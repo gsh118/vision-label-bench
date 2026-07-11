@@ -15,6 +15,7 @@ export interface ProjectPreferences {
   exportScope: "current" | "all";
   includeConfidence: boolean;
   includeSuggestions: boolean;
+  includeOriginalImages: boolean;
 }
 
 export interface ProjectState {
@@ -36,6 +37,8 @@ export interface ProjectImageRecord {
   height: number;
   elapsedMs: number | null;
   annotations: Annotation[];
+  relativePath: string | null;
+  split: SessionImage["split"];
 }
 
 export interface ProjectDocumentV1 {
@@ -83,6 +86,8 @@ export function createProjectDocument(
       height: image.height,
       elapsedMs: image.elapsedMs,
       annotations: image.annotations.map((annotation) => ({ ...annotation })),
+      relativePath: image.relativePath,
+      split: image.split,
     })),
   };
 }
@@ -154,6 +159,8 @@ export function hydrateProjectDocument(
       elapsedMs: image.elapsedMs,
       annotations: image.annotations.map((annotation) => ({ ...annotation })),
       error: null,
+      relativePath: image.relativePath,
+      split: image.split,
     };
   });
 
@@ -184,6 +191,7 @@ function parseModelConfig(value: unknown): ModelConfig {
     device,
     confidence: readFiniteNumber(value.confidence, "modelConfig.confidence", 0.01, 1),
     iou: readFiniteNumber(value.iou, "modelConfig.iou", 0.01, 1),
+    classMap: parseClassMap(value.classMap),
   };
 }
 
@@ -209,6 +217,7 @@ function parsePreferences(value: unknown): ProjectPreferences {
     exportScope,
     includeConfidence: value.includeConfidence,
     includeSuggestions: value.includeSuggestions ?? false,
+    includeOriginalImages: typeof value.includeOriginalImages === "boolean" ? value.includeOriginalImages : false,
   };
 }
 
@@ -239,13 +248,15 @@ function parseImageRecord(value: unknown, index: number): ProjectImageRecord {
     annotations: readArray(value.annotations, `images[${index}].annotations`).map((item, annotationIndex) => (
       parseAnnotation(item, `images[${index}].annotations[${annotationIndex}]`)
     )),
+    relativePath: value.relativePath == null ? null : readString(value.relativePath, `images[${index}].relativePath`),
+    split: parseSplit(value.split, `images[${index}].split`),
   };
 }
 
 function parseAnnotation(value: unknown, path: string): Annotation {
   if (!isRecord(value)) throw new ProjectDocumentError(`${path} 형식이 올바르지 않습니다.`);
   const source = value.source;
-  if (source !== "model" && source !== "manual") throw new ProjectDocumentError(`${path}.source 값이 올바르지 않습니다.`);
+  if (source !== "model" && source !== "manual" && source !== "import") throw new ProjectDocumentError(`${path}.source 값이 올바르지 않습니다.`);
   const score = value.score === null ? null : readFiniteNumber(value.score, `${path}.score`, 0, 1);
   const reviewState = value.reviewState ?? "accepted";
   if (reviewState !== "suggested" && reviewState !== "accepted" && reviewState !== "edited") {
@@ -297,4 +308,16 @@ function readInteger(value: unknown, path: string, min?: number): number {
   const parsed = readFiniteNumber(value, path, min);
   if (!Number.isInteger(parsed)) throw new ProjectDocumentError(`${path} 값이 정수가 아닙니다.`);
   return parsed;
+}
+
+function parseSplit(value: unknown, path: string): SessionImage["split"] {
+  if (value === undefined) return "unspecified";
+  if (value === "train" || value === "val" || value === "test" || value === "unspecified") return value;
+  throw new ProjectDocumentError(`${path} 값이 올바르지 않습니다.`);
+}
+
+function parseClassMap(value: unknown): Record<string, number> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new ProjectDocumentError("modelConfig.classMap 형식이 올바르지 않습니다.");
+  return Object.fromEntries(Object.entries(value).map(([key, mapped]) => [key, readInteger(mapped, `modelConfig.classMap.${key}`, 0)]));
 }

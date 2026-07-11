@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
+import base64
+import binascii
 import json
 import re
 import zipfile
-from pathlib import PurePath
+from pathlib import PurePath, PurePosixPath
 from xml.etree import ElementTree as ET
 
 from lb_tool.schemas import ExportAnnotation, ExportFormat, ExportImage, ExportRequest
@@ -27,16 +29,22 @@ def _write_yolo(archive: zipfile.ZipFile, request: ExportRequest) -> None:
     ordered_classes = sorted(request.classes.items())
     archive.writestr("classes.txt", "\n".join(name for _, name in ordered_classes) + "\n")
     names_yaml = "\n".join(f"  {class_id}: {json.dumps(name, ensure_ascii=False)}" for class_id, name in ordered_classes)
-    archive.writestr(
-        "data.yaml",
-        f"path: .\ntrain: images/train\nval: images/val\nnames:\n{names_yaml}\n",
-    )
+    exported_splits = {"train" if image.split == "unspecified" else image.split for image in request.images}
+    split_yaml = "\n".join(f"{split_name}: images/{split_name}" for split_name in ("train", "val", "test") if split_name in exported_splits)
+    archive.writestr("data.yaml", f"path: .\n{split_yaml}\nnames:\n{names_yaml}\n")
+    used_paths_by_split: dict[str, set[str]] = {}
     for image in request.images:
+        split = "train" if image.split == "unspecified" else image.split
+        relative = _relative_image_path(image)
+        output_path = _unique_path(relative, used_paths_by_split.setdefault(split, set()))
         lines = [
             _yolo_line(annotation, image, request.include_confidence)
             for annotation in image.annotations
         ]
-        archive.writestr(f"labels/{_safe_stem(image.filename)}.txt", "\n".join(lines) + ("\n" if lines else ""))
+        label_path = str(PurePosixPath(output_path).with_suffix(".txt"))
+        archive.writestr(f"labels/{split}/{label_path}", "\n".join(lines) + ("\n" if lines else ""))
+        if request.include_original_images:
+            archive.writestr(f"images/{split}/{output_path}", _decode_image_data(image.image_data or ""))
 
 
 def _yolo_line(annotation: ExportAnnotation, image: ExportImage, include_confidence: bool) -> str:
@@ -132,11 +140,49 @@ def _safe_stem(filename: str) -> str:
     return safe or "image"
 
 
+def _relative_image_path(image: ExportImage) -> str:
+    raw = (image.relative_path or image.filename).replace("\\", "/")
+    parts = list(PurePosixPath(raw).parts)
+    if any(part in {"", ".", ".."} for part in parts) or PurePosixPath(raw).is_absolute():
+        return _safe_filename(image.filename)
+    if "images" in parts:
+        index = len(parts) - 1 - parts[::-1].index("images")
+        parts = parts[index + 1 :]
+        if parts and parts[0] in {"train", "val", "test", "unspecified"}:
+            parts = parts[1:]
+    safe_parts = [_safe_filename(part) for part in parts]
+    return "/".join(safe_parts) if safe_parts else _safe_filename(image.filename)
+
+
+def _safe_filename(filename: str) -> str:
+    safe = re.sub(r"[^\w.-]+", "_", filename, flags=re.UNICODE).strip(".")
+    return safe or "image"
+
+
+def _unique_path(path: str, used: set[str]) -> str:
+    candidate = path
+    index = 2
+    while candidate.casefold() in used:
+        pure = PurePosixPath(path)
+        candidate = str(pure.with_name(f"{pure.stem}_{index}{pure.suffix}"))
+        index += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
+def _decode_image_data(value: str) -> bytes:
+    if not value.startswith("data:image/") or ";base64," not in value:
+        raise ValueError("Invalid original image data")
+    try:
+        return base64.b64decode(value.split(",", 1)[1], validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("Invalid original image data") from error
+
+
 def _readme(export_format: ExportFormat) -> str:
     return (
         "Label Bench annotation export\n"
         f"Format: {export_format.value}\n"
         "Coordinates were clipped to each image boundary during export.\n"
-        "Original image files are not included.\n"
+        "Original image inclusion follows the export option.\n"
     )
-

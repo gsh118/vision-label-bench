@@ -1,6 +1,7 @@
 import {
   CheckCircle,
   Cpu,
+  Database,
   FilePlus,
   FloppyDisk,
   FolderOpen,
@@ -27,6 +28,7 @@ interface SessionRailProps {
   onNewProject: () => void;
   onOpenProject: (file: File) => void;
   onSaveProject: () => void;
+  onImportDataset: () => void;
   onSelect: (id: string) => void;
   onModelChange: (patch: Partial<ModelConfig>) => void;
   onLoadModel: () => void;
@@ -76,6 +78,9 @@ export function SessionRail(props: SessionRailProps) {
             <FloppyDisk size={14} /> 저장
           </button>
         </div>
+        <button className="secondary-button mt-1.5 w-full justify-center" onClick={props.onImportDataset} disabled={props.projectBusy}>
+          <Database size={14} /> 데이터셋 가져오기
+        </button>
       </section>
 
       <section className="border-b border-white/8 p-4">

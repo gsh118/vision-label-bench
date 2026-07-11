@@ -42,6 +42,7 @@ function makeState(status: SessionImage["status"] = "running"): ProjectState {
       exportScope: "current",
       includeConfidence: true,
       includeSuggestions: false,
+      includeOriginalImages: false,
     },
     images: [{
       id: "image-1",
@@ -54,6 +55,8 @@ function makeState(status: SessionImage["status"] = "running"): ProjectState {
       elapsedMs: 18.7,
       annotations: [annotation],
       error: "runtime-only error",
+      relativePath: null,
+      split: "unspecified",
     }],
   };
 }
@@ -113,10 +116,16 @@ describe("project document", () => {
   it("migrates legacy v1 labels as accepted without changing old export behavior", () => {
     const legacy = JSON.parse(JSON.stringify(createProjectDocument(makeState()))) as Record<string, any>;
     delete legacy.preferences.includeSuggestions;
+    delete legacy.preferences.includeOriginalImages;
+    delete legacy.images[0].relativePath;
+    delete legacy.images[0].split;
     delete legacy.images[0].annotations[0].reviewState;
 
     const parsed = parseProjectDocument(legacy);
     expect(parsed.preferences.includeSuggestions).toBe(false);
+    expect(parsed.preferences.includeOriginalImages).toBe(false);
+    expect(parsed.images[0].relativePath).toBeNull();
+    expect(parsed.images[0].split).toBe("unspecified");
     expect(parsed.images[0].annotations[0].reviewState).toBe("accepted");
   });
 

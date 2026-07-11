@@ -59,29 +59,35 @@ export async function exportAnnotations(options: {
   images: SessionImage[];
   classes: LabelClass[];
   includeConfidence: boolean;
+  includeOriginalImages: boolean;
 }): Promise<void> {
   const classMap = Object.fromEntries(options.classes.map((item) => [item.id, item.name]));
+  const images = await Promise.all(options.images.map(async (image) => ({
+    filename: image.name,
+    relative_path: image.relativePath,
+    split: image.split,
+    image_data: options.includeOriginalImages ? await fileToDataUrl(image.file) : null,
+    width: image.width,
+    height: image.height,
+    annotations: image.annotations.map((annotation) => ({
+      class_id: annotation.classId,
+      label: annotation.label,
+      score: annotation.score,
+      x1: annotation.x1,
+      y1: annotation.y1,
+      x2: annotation.x2,
+      y2: annotation.y2,
+    })),
+  })));
   const response = await fetch("/api/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       format: options.format,
       include_confidence: options.includeConfidence,
+      include_original_images: options.includeOriginalImages,
       classes: classMap,
-      images: options.images.map((image) => ({
-        filename: image.name,
-        width: image.width,
-        height: image.height,
-        annotations: image.annotations.map((annotation) => ({
-          class_id: annotation.classId,
-          label: annotation.label,
-          score: annotation.score,
-          x1: annotation.x1,
-          y1: annotation.y1,
-          x2: annotation.x2,
-          y2: annotation.y2,
-        })),
-      })),
+      images,
     }),
   });
   if (!response.ok) throw new Error(await errorMessage(response));
@@ -94,6 +100,16 @@ export async function exportAnnotations(options: {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 24_576;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return `data:${file.type || "application/octet-stream"};base64,${btoa(binary)}`;
 }
 
 async function errorMessage(response: Response): Promise<string> {

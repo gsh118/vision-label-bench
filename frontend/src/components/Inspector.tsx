@@ -28,6 +28,7 @@ interface InspectorProps {
   exportScope: "current" | "all";
   includeConfidence: boolean;
   includeSuggestions: boolean;
+  includeOriginalImages: boolean;
   reviewFilter: "all" | "pending";
   exporting: boolean;
   exportError: string;
@@ -45,6 +46,7 @@ interface InspectorProps {
   onExportScope: (scope: "current" | "all") => void;
   onIncludeConfidence: (value: boolean) => void;
   onIncludeSuggestions: (value: boolean) => void;
+  onIncludeOriginalImages: (value: boolean) => void;
   onExport: () => void;
   onClearError: () => void;
 }
@@ -252,6 +254,11 @@ export function Inspector(props: InspectorProps) {
         <label className="option-check mt-2">
           <input type="checkbox" checked={props.includeSuggestions} onChange={(event) => props.onIncludeSuggestions(event.target.checked)} /> 검수 전 모델 제안 포함
         </label>
+        {props.exportFormat === "yolo" && (
+          <label className="option-check mt-2">
+            <input type="checkbox" checked={props.includeOriginalImages} onChange={(event) => props.onIncludeOriginalImages(event.target.checked)} /> 원본 이미지 포함
+          </label>
+        )}
         {pendingCount > 0 && !props.includeSuggestions && (
           <p className="mt-2 text-[9px] leading-4 text-[#8f7a58]">검수 전 제안 {pendingCount}개는 현재 내보내기에서 제외됩니다.</p>
         )}

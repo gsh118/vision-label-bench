@@ -36,6 +36,8 @@ function makeImage(id: string, byte: number, annotationCount = 1): SessionImage 
       y2: 90,
     }] : [],
     error: null,
+    relativePath: null,
+    split: "unspecified",
   };
 }
 
@@ -45,7 +47,7 @@ function makeState(images = [makeImage("one", 4)]): ProjectState {
     classes: [{ id: 0, name: "object", color: "#99c2a2" }],
     images,
     selectedImageId: images[0]?.id ?? null,
-    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false },
+    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false, includeOriginalImages: false },
   };
 }
 

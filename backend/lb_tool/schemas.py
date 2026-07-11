@@ -135,6 +135,9 @@ class ExportAnnotation(BaseModel):
 
 class ExportImage(BaseModel):
     filename: str = Field(min_length=1, max_length=1024)
+    relative_path: str | None = Field(default=None, max_length=2048)
+    split: Literal["train", "val", "test", "unspecified"] = "unspecified"
+    image_data: str | None = None
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     annotations: list[ExportAnnotation] = Field(default_factory=list)
@@ -145,3 +148,10 @@ class ExportRequest(BaseModel):
     images: list[ExportImage] = Field(min_length=1)
     classes: dict[int, str]
     include_confidence: bool = False
+    include_original_images: bool = False
+
+    @model_validator(mode="after")
+    def validate_original_images(self) -> "ExportRequest":
+        if self.include_original_images and any(not image.image_data for image in self.images):
+            raise ValueError("Original image data is required when include_original_images is enabled")
+        return self

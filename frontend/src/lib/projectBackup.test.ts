@@ -23,13 +23,15 @@ function makeState(): ProjectState {
     elapsedMs: null,
     annotations: [],
     error: null,
+    relativePath: null,
+    split: "unspecified",
   };
   return {
     modelConfig: { adapter: "auto", modelRef: "yolo11n.pt", device: "auto", confidence: 0.25, iou: 0.7 },
     classes: [{ id: 0, name: "object", color: "#99c2a2" }],
     images: [image],
     selectedImageId: image.id,
-    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false },
+    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false, includeOriginalImages: false },
   };
 }
 

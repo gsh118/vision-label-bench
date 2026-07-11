@@ -3,6 +3,7 @@ export type DeviceKind = "auto" | "cpu" | "cuda";
 export type ToolKind = "select" | "draw";
 export type ExportFormat = "yolo" | "coco" | "voc";
 export type ProjectSaveStatus = "restoring" | "saving" | "saved" | "error";
+export type DatasetSplit = "train" | "val" | "test" | "unspecified";
 
 export interface ModelConfig {
   adapter: AdapterKind;
@@ -10,6 +11,7 @@ export interface ModelConfig {
   device: DeviceKind;
   confidence: number;
   iou: number;
+  classMap?: Record<string, number>;
 }
 
 export interface LabelClass {
@@ -30,7 +32,7 @@ export interface Annotation extends BoxCoordinates {
   classId: number;
   label: string;
   score: number | null;
-  source: "model" | "manual";
+  source: "model" | "manual" | "import";
   reviewState: "suggested" | "accepted" | "edited";
 }
 
@@ -47,6 +49,8 @@ export interface SessionImage {
   elapsedMs: number | null;
   annotations: Annotation[];
   error: string | null;
+  relativePath: string | null;
+  split: DatasetSplit;
 }
 
 export interface ModelInfo {

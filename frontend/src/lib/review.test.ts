@@ -52,6 +52,8 @@ describe("suggestion review", () => {
       elapsedMs: null,
       annotations: [pending],
       error: null,
+      relativePath: null,
+      split: "unspecified" as const,
     }];
     const prepared = prepareImagesForExport(images, false);
 

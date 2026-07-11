@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnnotationCanvas } from "./components/AnnotationCanvas";
+import { ClassMappingDialog } from "./components/ClassMappingDialog";
+import { DatasetImportDialog } from "./components/DatasetImportDialog";
 import { Header } from "./components/Header";
 import { Inspector } from "./components/Inspector";
 import { ModelBrowser } from "./components/ModelBrowser";
 import { ModelInfoPanel } from "./components/ModelInfoPanel";
 import { SessionRail } from "./components/SessionRail";
 import { exportAnnotations, getHealth, inferImage, loadModel } from "./lib/api";
+import { resolveClassConflicts, type ClassResolution, type DatasetImportManifest } from "./lib/datasetImport";
 import {
   applyAnnotationCommand,
   isNoopCommand,
@@ -37,6 +40,7 @@ import type {
   LabelClass,
   ModelConfig,
   ModelInspection,
+  ModelLoadResponse,
   ProjectSaveStatus,
   SessionImage,
   ToolKind,
@@ -71,6 +75,7 @@ export default function App() {
   const [exportScope, setExportScope] = useState<"current" | "all">("all");
   const [includeConfidence, setIncludeConfidence] = useState(false);
   const [includeSuggestions, setIncludeSuggestions] = useState(false);
+  const [includeOriginalImages, setIncludeOriginalImages] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<"all" | "pending">("all");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
@@ -78,17 +83,23 @@ export default function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectStatus, setProjectStatus] = useState<ProjectSaveStatus>("restoring");
   const [projectMessage, setProjectMessage] = useState("이전 로컬 작업을 확인하는 중");
+  const [datasetImportOpen, setDatasetImportOpen] = useState(false);
+  const [pendingModelMapping, setPendingModelMapping] = useState<{ response: ModelLoadResponse; resolutions: ClassResolution[] } | null>(null);
   const [annotationHistory, setAnnotationHistory] = useState<AnnotationHistory>({});
   const imagesRef = useRef(images);
   const selectedImageIdRef = useRef(selectedImageId);
   const selectedAnnotationIdRef = useRef(selectedAnnotationId);
   const historyRef = useRef(annotationHistory);
+  const classesRef = useRef(classes);
+  const modelConfigRef = useRef(modelConfig);
   const autosaveRevisionRef = useRef(0);
   const storageRequestedRef = useRef(false);
   imagesRef.current = images;
   selectedImageIdRef.current = selectedImageId;
   selectedAnnotationIdRef.current = selectedAnnotationId;
   historyRef.current = annotationHistory;
+  classesRef.current = classes;
+  modelConfigRef.current = modelConfig;
 
   const replaceHistory = useCallback((nextHistory: AnnotationHistory) => {
     historyRef.current = nextHistory;
@@ -141,6 +152,7 @@ export default function App() {
     setExportScope(project.preferences.exportScope);
     setIncludeConfidence(project.preferences.includeConfidence);
     setIncludeSuggestions(project.preferences.includeSuggestions);
+    setIncludeOriginalImages(project.preferences.includeOriginalImages);
     setReviewFilter("all");
     setTool("select");
     setModelStatus("idle");
@@ -202,8 +214,9 @@ export default function App() {
       exportScope,
       includeConfidence,
       includeSuggestions,
+      includeOriginalImages,
     },
-  }), [classes, exportFormat, exportScope, images, includeConfidence, includeSuggestions, modelConfig, selectedImageId, zoom]);
+  }), [classes, exportFormat, exportScope, images, includeConfidence, includeOriginalImages, includeSuggestions, modelConfig, selectedImageId, zoom]);
 
   useEffect(() => {
     if (!projectReady) return;
@@ -250,26 +263,35 @@ export default function App() {
     setSelectedAnnotationId(null);
   }, []);
 
-  const mergeModelClasses = (incoming: Record<string, string>) => {
-    setClasses((previous) => {
-      const map = new Map(previous.map((item) => [item.id, item]));
-      for (const [rawId, name] of Object.entries(incoming)) {
-        const id = Number(rawId);
-        map.set(id, { id, name, color: map.get(id)?.color ?? PALETTE[id % PALETTE.length] });
-      }
-      return [...map.values()].sort((a, b) => a.id - b.id);
-    });
+  const mergeModelClasses = (incoming: Record<string, string>, overrides?: ClassResolution[]): Record<string, number> => {
+    const source = Object.entries(incoming).map(([rawId, name]) => ({ id: Number(rawId), name }));
+    const configured = modelConfigRef.current.classMap;
+    const validConfigured = configured && source.every((item) => configured[String(item.id)] != null);
+    const resolutions = overrides ?? (validConfigured
+      ? source.map((item) => ({ sourceId: item.id, sourceName: item.name, targetId: configured[String(item.id)], targetName: classesRef.current.find((entry) => entry.id === configured[String(item.id)])?.name ?? item.name, conflict: "none" as const }))
+      : resolveClassConflicts(classesRef.current, source));
+    const classMap = Object.fromEntries(resolutions.map((item) => [String(item.sourceId), item.targetId]));
+    const next = new Map(classesRef.current.map((item) => [item.id, item]));
+    for (const resolution of resolutions) {
+      if (!next.has(resolution.targetId)) next.set(resolution.targetId, { id: resolution.targetId, name: resolution.targetName, color: PALETTE[resolution.targetId % PALETTE.length] });
+    }
+    const nextClasses = [...next.values()].sort((a, b) => a.id - b.id);
+    classesRef.current = nextClasses;
+    setClasses(nextClasses);
+    modelConfigRef.current = { ...modelConfigRef.current, classMap };
+    setModelConfig((config) => ({ ...config, classMap }));
+    return classMap;
   };
 
   const runInference = async (image: SessionImage) => {
     patchSessionImage(image.id, { status: "running", error: null });
     try {
       const response = await inferImage(image, modelConfig);
-      mergeModelClasses(response.model.classes);
+      const classMap = mergeModelClasses(response.model.classes);
       const annotations: Annotation[] = response.detections.map((item) => ({
         id: crypto.randomUUID(),
-        classId: item.class_id,
-        label: item.label,
+        classId: classMap[String(item.class_id)] ?? item.class_id,
+        label: classesRef.current.find((entry) => entry.id === (classMap[String(item.class_id)] ?? item.class_id))?.name ?? item.label,
         score: item.score,
         source: "model",
         reviewState: "suggested",
@@ -337,7 +359,15 @@ export default function App() {
     setModelInfoOpen(true);
     try {
       const response = await loadModel(modelConfig);
-      mergeModelClasses(response.model.classes);
+      const source = Object.entries(response.model.classes).map(([id, name]) => ({ id: Number(id), name }));
+      const resolutions = resolveClassConflicts(classesRef.current, source);
+      if (resolutions.some((item) => item.conflict === "id-conflict" || item.conflict === "same-name")) {
+        setPendingModelMapping({ response, resolutions });
+        setModelStatus("idle");
+        setModelMessage("클래스 매핑 확인 필요");
+        return;
+      }
+      mergeModelClasses(response.model.classes, resolutions);
       setModelStatus("ready");
       setModelMessage(`${response.model.adapter.toUpperCase()} 준비됨 · ${response.model.device}`);
       setModelInspection({
@@ -538,6 +568,7 @@ export default function App() {
     setExportScope("all");
     setIncludeConfidence(false);
     setIncludeSuggestions(false);
+    setIncludeOriginalImages(false);
     setReviewFilter("all");
     setTool("select");
     setModelStatus("idle");
@@ -606,12 +637,79 @@ export default function App() {
     setExporting(true);
     setExportError("");
     try {
-      await exportAnnotations({ format: exportFormat, images: exportImages, classes, includeConfidence });
+      await exportAnnotations({ format: exportFormat, images: exportImages, classes, includeConfidence, includeOriginalImages });
     } catch (error) {
       setExportError(error instanceof Error ? error.message : "내보내기에 실패했습니다.");
     } finally {
       setExporting(false);
     }
+  };
+
+  const applyDatasetImport = (
+    manifest: DatasetImportManifest,
+    resolutions: ClassResolution[],
+    mode: "new" | "append",
+  ) => {
+    if (mode === "new" && imagesRef.current.length && !window.confirm("현재 작업을 가져온 데이터셋으로 교체할까요?")) return;
+    const idMap = new Map(resolutions.map((item) => [item.sourceId, item.targetId]));
+    const targetClasses = mode === "append"
+      ? new Map(classesRef.current.map((item) => [item.id, item]))
+      : new Map<number, LabelClass>();
+    for (const resolution of resolutions) {
+      if (!targetClasses.has(resolution.targetId)) {
+        targetClasses.set(resolution.targetId, {
+          id: resolution.targetId,
+          name: resolution.targetName.trim(),
+          color: PALETTE[resolution.targetId % PALETTE.length],
+        });
+      }
+    }
+    const importedImages: SessionImage[] = manifest.images.map((image) => ({
+      id: crypto.randomUUID(),
+      file: image.file,
+      name: image.name,
+      url: URL.createObjectURL(image.file),
+      width: image.width,
+      height: image.height,
+      status: "ready",
+      elapsedMs: null,
+      annotations: image.annotations.map((annotation) => {
+        const classId = idMap.get(annotation.classId) ?? annotation.classId;
+        return {
+          ...annotation,
+          id: crypto.randomUUID(),
+          classId,
+          label: targetClasses.get(classId)?.name ?? annotation.label,
+        };
+      }),
+      error: null,
+      relativePath: image.relativePath,
+      split: image.split,
+    }));
+    const nextClasses = [...targetClasses.values()].sort((a, b) => a.id - b.id);
+    classesRef.current = nextClasses;
+    setClasses(nextClasses);
+    if (mode === "new") {
+      autosaveRevisionRef.current += 1;
+      replaceSessionImages(importedImages);
+      setSelectedImageId(importedImages[0]?.id ?? null);
+      modelConfigRef.current = { ...DEFAULT_MODEL_CONFIG };
+      setModelConfig({ ...DEFAULT_MODEL_CONFIG });
+      resetHistory();
+    } else {
+      const nextImages = [...imagesRef.current, ...importedImages];
+      imagesRef.current = nextImages;
+      setImages(nextImages);
+      setSelectedImageId((current) => current ?? importedImages[0]?.id ?? null);
+    }
+    if (!storageRequestedRef.current && importedImages.length) {
+      storageRequestedRef.current = true;
+      void requestPersistentProjectStorage();
+    }
+    setSelectedAnnotationId(null);
+    setDatasetImportOpen(false);
+    setProjectStatus("saving");
+    setProjectMessage(`${manifest.sourceName} 가져옴 · 이미지 ${importedImages.length}장 · 클래스 ${nextClasses.length}개`);
   };
 
   useEffect(() => {
@@ -698,9 +796,14 @@ export default function App() {
           onNewProject={newProject}
           onOpenProject={(file) => void openProject(file)}
           onSaveProject={() => void saveProject()}
+          onImportDataset={() => setDatasetImportOpen(true)}
           onSelect={(id) => { setSelectedImageId(id); setSelectedAnnotationId(null); }}
           onModelChange={(patch) => {
-            setModelConfig((config) => ({ ...config, ...patch }));
+            setModelConfig((config) => ({
+              ...config,
+              ...patch,
+              classMap: patch.modelRef !== undefined || patch.adapter !== undefined ? undefined : config.classMap,
+            }));
             setModelStatus("idle");
             setModelMessage("");
             setModelInspection(null);
@@ -734,6 +837,7 @@ export default function App() {
           exportScope={exportScope}
           includeConfidence={includeConfidence}
           includeSuggestions={includeSuggestions}
+          includeOriginalImages={includeOriginalImages}
           reviewFilter={reviewFilter}
           exporting={exporting}
           exportError={exportError}
@@ -754,6 +858,7 @@ export default function App() {
           onExportScope={setExportScope}
           onIncludeConfidence={setIncludeConfidence}
           onIncludeSuggestions={setIncludeSuggestions}
+          onIncludeOriginalImages={setIncludeOriginalImages}
           onExport={() => void doExport()}
           onClearError={() => setExportError("")}
         />
@@ -764,7 +869,7 @@ export default function App() {
         initialPath={modelConfig.modelRef}
         onClose={() => setModelBrowserOpen(false)}
         onSelect={(modelRef) => {
-          setModelConfig((config) => ({ ...config, modelRef }));
+          setModelConfig((config) => ({ ...config, modelRef, classMap: undefined }));
           setModelStatus("idle");
           setModelMessage("");
           setModelInspection(null);
@@ -779,6 +884,33 @@ export default function App() {
         canTest={Boolean(currentImage && modelInspection)}
         onClose={() => setModelInfoOpen(false)}
         onTest={() => currentImage && void runInference(currentImage)}
+      />
+      <DatasetImportDialog
+        open={datasetImportOpen}
+        existingClasses={classList}
+        onClose={() => setDatasetImportOpen(false)}
+        onApply={applyDatasetImport}
+      />
+      <ClassMappingDialog
+        open={Boolean(pendingModelMapping)}
+        modelName={pendingModelMapping?.response.model.model_ref ?? ""}
+        resolutions={pendingModelMapping?.resolutions ?? []}
+        onChange={(resolutions) => setPendingModelMapping((pending) => pending ? { ...pending, resolutions } : null)}
+        onClose={() => {
+          setPendingModelMapping(null);
+          setModelInfoOpen(false);
+          setModelMessage("클래스 매핑 취소됨");
+        }}
+        onApply={() => {
+          if (!pendingModelMapping) return;
+          const { response, resolutions } = pendingModelMapping;
+          mergeModelClasses(response.model.classes, resolutions);
+          setModelStatus("ready");
+          setModelMessage(`${response.model.adapter.toUpperCase()} 준비됨 · ${response.model.device}`);
+          setModelInspection({ model: response.model, loadTimeMs: response.load_time_ms, cached: response.cached, inference: null });
+          setModelInfoOpen(true);
+          setPendingModelMapping(null);
+        }}
       />
     </div>
   );
@@ -803,6 +935,8 @@ async function readSessionImage(file: File): Promise<SessionImage> {
     elapsedMs: null,
     annotations: [],
     error: null,
+    relativePath: null,
+    split: "unspecified",
   };
 }
 
