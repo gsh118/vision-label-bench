@@ -6,6 +6,16 @@ import { ModelBrowser } from "./components/ModelBrowser";
 import { ModelInfoPanel } from "./components/ModelInfoPanel";
 import { SessionRail } from "./components/SessionRail";
 import { exportAnnotations, getHealth, inferImage, loadModel } from "./lib/api";
+import {
+  applyAnnotationCommand,
+  isNoopCommand,
+  recordAnnotationCommand,
+  redoAnnotationCommand,
+  resolveHistoryShortcut,
+  undoAnnotationCommand,
+  type AnnotationCommand,
+  type AnnotationHistory,
+} from "./lib/annotationHistory";
 import { downloadProjectBackup, readProjectBackup } from "./lib/projectBackup";
 import type { HydratedProject, ProjectState } from "./lib/projectDocument";
 import {
@@ -61,10 +71,24 @@ export default function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectStatus, setProjectStatus] = useState<ProjectSaveStatus>("restoring");
   const [projectMessage, setProjectMessage] = useState("이전 로컬 작업을 확인하는 중");
+  const [annotationHistory, setAnnotationHistory] = useState<AnnotationHistory>({});
   const imagesRef = useRef(images);
+  const selectedImageIdRef = useRef(selectedImageId);
+  const selectedAnnotationIdRef = useRef(selectedAnnotationId);
+  const historyRef = useRef(annotationHistory);
   const autosaveRevisionRef = useRef(0);
   const storageRequestedRef = useRef(false);
   imagesRef.current = images;
+  selectedImageIdRef.current = selectedImageId;
+  selectedAnnotationIdRef.current = selectedAnnotationId;
+  historyRef.current = annotationHistory;
+
+  const replaceHistory = useCallback((nextHistory: AnnotationHistory) => {
+    historyRef.current = nextHistory;
+    setAnnotationHistory(nextHistory);
+  }, []);
+
+  const resetHistory = useCallback(() => replaceHistory({}), [replaceHistory]);
 
   const replaceSessionImages = useCallback((nextImages: SessionImage[]) => {
     const previousImages = imagesRef.current;
@@ -72,6 +96,32 @@ export default function App() {
     setImages(nextImages);
     for (const image of previousImages) URL.revokeObjectURL(image.url);
   }, []);
+
+  const replaceImageAnnotations = useCallback((imageId: string, annotations: Annotation[]) => {
+    const nextImages = imagesRef.current.map((image) => image.id === imageId
+      ? { ...image, annotations }
+      : image);
+    imagesRef.current = nextImages;
+    setImages(nextImages);
+  }, []);
+
+  const patchSessionImage = useCallback((imageId: string, patch: Partial<Omit<SessionImage, "id">>) => {
+    const nextImages = imagesRef.current.map((image) => image.id === imageId
+      ? { ...image, ...patch }
+      : image);
+    imagesRef.current = nextImages;
+    setImages(nextImages);
+  }, []);
+
+  const commitAnnotationCommand = useCallback((command: AnnotationCommand) => {
+    if (isNoopCommand(command)) return;
+    const image = imagesRef.current.find((item) => item.id === command.imageId);
+    if (!image) return;
+    const applied = applyAnnotationCommand(image.annotations, command, "forward");
+    replaceImageAnnotations(command.imageId, applied.annotations);
+    replaceHistory(recordAnnotationCommand(historyRef.current, command));
+    if (selectedImageIdRef.current === command.imageId) setSelectedAnnotationId(applied.selection);
+  }, [replaceHistory, replaceImageAnnotations]);
 
   const applyProject = useCallback((project: HydratedProject) => {
     replaceSessionImages(project.images);
@@ -89,7 +139,8 @@ export default function App() {
     setModelInspection(null);
     setModelInfoOpen(false);
     setExportError("");
-  }, [replaceSessionImages]);
+    resetHistory();
+  }, [replaceSessionImages, resetHistory]);
 
   useEffect(() => {
     let active = true;
@@ -201,7 +252,7 @@ export default function App() {
   };
 
   const runInference = async (image: SessionImage) => {
-    setImages((items) => items.map((item) => item.id === image.id ? { ...item, status: "running", error: null } : item));
+    patchSessionImage(image.id, { status: "running", error: null });
     try {
       const response = await inferImage(image, modelConfig);
       mergeModelClasses(response.model.classes);
@@ -216,15 +267,24 @@ export default function App() {
         x2: item.x2,
         y2: item.y2,
       }));
-      setImages((items) => items.map((item) => item.id === image.id ? {
-        ...item,
+      const latestImage = imagesRef.current.find((item) => item.id === image.id);
+      if (latestImage) {
+        commitAnnotationCommand({
+          kind: "replace-all",
+          imageId: image.id,
+          before: latestImage.annotations,
+          after: annotations,
+          selectionBefore: selectedImageIdRef.current === image.id ? selectedAnnotationIdRef.current : null,
+          selectionAfter: null,
+        });
+      }
+      patchSessionImage(image.id, {
         width: response.width,
         height: response.height,
         status: "ready",
         elapsedMs: response.elapsed_ms,
-        annotations,
         error: null,
-      } : item));
+      });
       setModelStatus("ready");
       setModelMessage(`${response.model.adapter.toUpperCase()} · ${response.model.device} · ${response.elapsed_ms.toFixed(0)} ms`);
       setModelInspection((previous) => ({
@@ -239,7 +299,7 @@ export default function App() {
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "추론에 실패했습니다.";
-      setImages((items) => items.map((item) => item.id === image.id ? { ...item, status: "error", error: message } : item));
+      patchSessionImage(image.id, { status: "error", error: message });
       setModelStatus("error");
       setModelMessage(message);
     }
@@ -280,12 +340,23 @@ export default function App() {
     }
   };
 
-  const updateAnnotation = (id: string, box: BoxCoordinates) => {
+  const commitBoxChange = (
+    id: string,
+    before: BoxCoordinates,
+    after: BoxCoordinates,
+    gesture: "move" | "resize",
+  ) => {
     if (!currentImage) return;
-    setImages((items) => items.map((image) => image.id === currentImage.id ? {
-      ...image,
-      annotations: image.annotations.map((annotation) => annotation.id === id ? { ...annotation, ...box } : annotation),
-    } : image));
+    commitAnnotationCommand({
+      kind: "box",
+      imageId: currentImage.id,
+      annotationId: id,
+      gesture,
+      before,
+      after,
+      selectionBefore: id,
+      selectionAfter: id,
+    });
   };
 
   const createAnnotation = (box: BoxCoordinates) => {
@@ -299,34 +370,47 @@ export default function App() {
       source: "manual",
       ...box,
     };
-    setImages((items) => items.map((image) => image.id === currentImage.id ? {
-      ...image,
-      status: "ready",
-      annotations: [...image.annotations, annotation],
-    } : image));
-    setSelectedAnnotationId(annotation.id);
+    commitAnnotationCommand({
+      kind: "create",
+      imageId: currentImage.id,
+      annotation,
+      index: currentImage.annotations.length,
+      selectionBefore: selectedAnnotationId,
+      selectionAfter: annotation.id,
+    });
+    patchSessionImage(currentImage.id, { status: "ready" });
     setTool("select");
   };
 
   const deleteAnnotation = useCallback((id: string) => {
-    setImages((items) => items.map((image) => image.id === selectedImageId ? {
-      ...image,
-      annotations: image.annotations.filter((annotation) => annotation.id !== id),
-    } : image));
-    setSelectedAnnotationId(null);
-  }, [selectedImageId]);
+    const imageId = selectedImageIdRef.current;
+    const image = imagesRef.current.find((item) => item.id === imageId);
+    const index = image?.annotations.findIndex((annotation) => annotation.id === id) ?? -1;
+    if (!image || index < 0) return;
+    commitAnnotationCommand({
+      kind: "delete",
+      imageId: image.id,
+      annotation: image.annotations[index],
+      index,
+      selectionBefore: id,
+      selectionAfter: null,
+    });
+  }, [commitAnnotationCommand]);
 
   const changeAnnotationClass = (id: string, classId: number) => {
     const chosenClass = classes.find((item) => item.id === classId);
     if (!currentImage || !chosenClass) return;
-    setImages((items) => items.map((image) => image.id === currentImage.id ? {
-      ...image,
-      annotations: image.annotations.map((annotation) => annotation.id === id ? {
-        ...annotation,
-        classId,
-        label: chosenClass.name,
-      } : annotation),
-    } : image));
+    const annotation = currentImage.annotations.find((item) => item.id === id);
+    if (!annotation) return;
+    commitAnnotationCommand({
+      kind: "class",
+      imageId: currentImage.id,
+      annotationId: id,
+      before: { classId: annotation.classId, label: annotation.label },
+      after: { classId, label: chosenClass.name },
+      selectionBefore: id,
+      selectionAfter: id,
+    });
   };
 
   const renameClass = (classId: number, name: string) => {
@@ -343,6 +427,28 @@ export default function App() {
       return [...items, { id, name, color: PALETTE[id % PALETTE.length] }];
     });
   };
+
+  const undoCurrent = useCallback(() => {
+    const imageId = selectedImageIdRef.current;
+    const image = imagesRef.current.find((item) => item.id === imageId);
+    if (!imageId || !image) return;
+    const transition = undoAnnotationCommand(historyRef.current, imageId, image.annotations);
+    if (!transition) return;
+    replaceImageAnnotations(imageId, transition.annotations);
+    replaceHistory(transition.history);
+    setSelectedAnnotationId(transition.selection);
+  }, [replaceHistory, replaceImageAnnotations]);
+
+  const redoCurrent = useCallback(() => {
+    const imageId = selectedImageIdRef.current;
+    const image = imagesRef.current.find((item) => item.id === imageId);
+    if (!imageId || !image) return;
+    const transition = redoAnnotationCommand(historyRef.current, imageId, image.annotations);
+    if (!transition) return;
+    replaceImageAnnotations(imageId, transition.annotations);
+    replaceHistory(transition.history);
+    setSelectedAnnotationId(transition.selection);
+  }, [replaceHistory, replaceImageAnnotations]);
 
   const newProject = () => {
     if (imagesRef.current.length && !window.confirm("현재 작업을 닫고 새 프로젝트를 시작할까요? 자동 저장된 작업도 교체됩니다.")) return;
@@ -362,6 +468,7 @@ export default function App() {
     setModelInspection(null);
     setModelInfoOpen(false);
     setExportError("");
+    resetHistory();
     setProjectStatus("saving");
     setProjectMessage("새 프로젝트를 준비하는 중");
     void clearLocalProject()
@@ -431,14 +538,33 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const editingText = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || Boolean(target?.isContentEditable);
+      const modifier = event.ctrlKey || event.metaKey;
+      const historyAction = resolveHistoryShortcut({
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        editingText,
+        isComposing: event.isComposing,
+        repeat: event.repeat,
+        defaultPrevented: event.defaultPrevented,
+      });
+      if (historyAction) {
+        event.preventDefault();
+        if (historyAction === "redo") redoCurrent();
+        else undoCurrent();
+        return;
+      }
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveProject();
         return;
       }
-      const tag = (event.target as HTMLElement)?.tagName;
-      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (editingText || modifier) return;
       if ((event.key === "Delete" || event.key === "Backspace") && selectedAnnotationId) {
         event.preventDefault();
         deleteAnnotation(selectedAnnotationId);
@@ -454,10 +580,11 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteAnnotation, saveProject, selectByOffset, selectedAnnotationId]);
+  }, [deleteAnnotation, redoCurrent, saveProject, selectByOffset, selectedAnnotationId, undoCurrent]);
 
   const running = currentImage?.status === "running";
   const classList = useMemo(() => [...classes].sort((a, b) => a.id - b.id), [classes]);
+  const currentHistory = currentImage ? annotationHistory[currentImage.id] : null;
 
   return (
     <div className="flex min-h-[100dvh] flex-col overflow-hidden bg-[#0e100f] text-[#e8ebe6] lg:h-[100dvh] lg:max-h-[100dvh]">
@@ -469,9 +596,13 @@ export default function App() {
         annotationCount={currentImage?.annotations.length ?? 0}
         canRun={Boolean(currentImage && modelConfig.modelRef.trim())}
         running={Boolean(running)}
+        canUndo={Boolean(currentHistory?.past.length)}
+        canRedo={Boolean(currentHistory?.future.length)}
         onPrevious={() => selectByOffset(-1)}
         onNext={() => selectByOffset(1)}
         onRun={runCurrent}
+        onUndo={undoCurrent}
+        onRedo={redoCurrent}
         onExport={() => document.getElementById("export-panel")?.scrollIntoView({ behavior: "smooth" })}
       />
       <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[264px_minmax(0,1fr)] lg:grid-cols-[264px_minmax(0,1fr)_304px]">
@@ -511,7 +642,7 @@ export default function App() {
           tool={tool}
           zoom={zoom}
           onSelect={setSelectedAnnotationId}
-          onUpdate={updateAnnotation}
+          onCommitBox={commitBoxChange}
           onCreate={createAnnotation}
           onFiles={addFiles}
         />

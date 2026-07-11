@@ -1,5 +1,5 @@
 import { ImageSquare, UploadSimple } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { boxSize, clampBox, normaliseBox } from "../lib/geometry";
 import type { Annotation, BoxCoordinates, LabelClass, SessionImage, ToolKind } from "../types";
 
@@ -11,6 +11,7 @@ interface DragState {
   startX: number;
   startY: number;
   original: BoxCoordinates;
+  current: BoxCoordinates;
 }
 
 interface DrawState {
@@ -27,7 +28,7 @@ interface AnnotationCanvasProps {
   tool: ToolKind;
   zoom: number;
   onSelect: (id: string | null) => void;
-  onUpdate: (id: string, box: BoxCoordinates) => void;
+  onCommitBox: (id: string, before: BoxCoordinates, after: BoxCoordinates, gesture: "move" | "resize") => void;
   onCreate: (box: BoxCoordinates) => void;
   onFiles: (files: FileList | File[]) => void;
 }
@@ -36,7 +37,26 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [drawing, setDrawing] = useState<DrawState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const drawingRef = useRef<DrawState | null>(null);
   const image = props.image;
+
+  const updateDragState = (value: DragState | null) => {
+    dragRef.current = value;
+    setDrag(value);
+  };
+
+  const updateDrawingState = (value: DrawState | null) => {
+    drawingRef.current = value;
+    setDrawing(value);
+  };
+
+  useEffect(() => {
+    dragRef.current = null;
+    drawingRef.current = null;
+    setDrag(null);
+    setDrawing(null);
+  }, [image?.id]);
 
   if (!image) {
     return (
@@ -86,38 +106,41 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
     props.onSelect(annotation.id);
-    setDrag({
+    updateDragState({
       annotationId: annotation.id,
       mode,
       startX: point.x,
       startY: point.y,
       original: annotation,
+      current: annotation,
     });
   };
 
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const point = pointFromEvent(event);
-    if (drag) {
-      const dx = point.x - drag.startX;
-      const dy = point.y - drag.startY;
-      let next: BoxCoordinates = { ...drag.original };
-      if (drag.mode === "move") {
-        const width = drag.original.x2 - drag.original.x1;
-        const height = drag.original.y2 - drag.original.y1;
-        const x1 = Math.min(Math.max(drag.original.x1 + dx, 0), image.width - width);
-        const y1 = Math.min(Math.max(drag.original.y1 + dy, 0), image.height - height);
+    const activeDrag = dragRef.current;
+    const activeDrawing = drawingRef.current;
+    if (activeDrag) {
+      const dx = point.x - activeDrag.startX;
+      const dy = point.y - activeDrag.startY;
+      let next: BoxCoordinates = { ...activeDrag.original };
+      if (activeDrag.mode === "move") {
+        const width = activeDrag.original.x2 - activeDrag.original.x1;
+        const height = activeDrag.original.y2 - activeDrag.original.y1;
+        const x1 = Math.min(Math.max(activeDrag.original.x1 + dx, 0), image.width - width);
+        const y1 = Math.min(Math.max(activeDrag.original.y1 + dy, 0), image.height - height);
         next = { x1, y1, x2: x1 + width, y2: y1 + height };
       } else {
-        if (drag.mode.includes("n")) next.y1 += dy;
-        if (drag.mode.includes("s")) next.y2 += dy;
-        if (drag.mode.includes("w")) next.x1 += dx;
-        if (drag.mode.includes("e")) next.x2 += dx;
+        if (activeDrag.mode.includes("n")) next.y1 += dy;
+        if (activeDrag.mode.includes("s")) next.y2 += dy;
+        if (activeDrag.mode.includes("w")) next.x1 += dx;
+        if (activeDrag.mode.includes("e")) next.x2 += dx;
         next = clampBox(next, image.width, image.height);
       }
       const size = boxSize(next);
-      if (size.width >= 3 && size.height >= 3) props.onUpdate(drag.annotationId, next);
-    } else if (drawing) {
-      setDrawing({ ...drawing, x: point.x, y: point.y });
+      if (size.width >= 3 && size.height >= 3) updateDragState({ ...activeDrag, current: next });
+    } else if (activeDrawing) {
+      updateDrawingState({ ...activeDrawing, x: point.x, y: point.y });
     }
   };
 
@@ -127,21 +150,37 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
     if (props.tool !== "draw") return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
-    setDrawing({ startX: point.x, startY: point.y, x: point.x, y: point.y });
+    updateDrawingState({ startX: point.x, startY: point.y, x: point.x, y: point.y });
   };
 
-  const finishPointer = () => {
-    if (drawing) {
+  const finishPointer = (event: React.PointerEvent<SVGSVGElement>) => {
+    handlePointerMove(event);
+    const activeDrag = dragRef.current;
+    const activeDrawing = drawingRef.current;
+    if (activeDrag) {
+      props.onCommitBox(
+        activeDrag.annotationId,
+        activeDrag.original,
+        activeDrag.current,
+        activeDrag.mode === "move" ? "move" : "resize",
+      );
+    }
+    if (activeDrawing) {
       const box = clampBox(
-        normaliseBox({ x1: drawing.startX, y1: drawing.startY, x2: drawing.x, y2: drawing.y }),
+        normaliseBox({ x1: activeDrawing.startX, y1: activeDrawing.startY, x2: activeDrawing.x, y2: activeDrawing.y }),
         image.width,
         image.height,
       );
       const size = boxSize(box);
       if (size.width >= 4 && size.height >= 4) props.onCreate(box);
     }
-    setDrag(null);
-    setDrawing(null);
+    updateDragState(null);
+    updateDrawingState(null);
+  };
+
+  const cancelPointer = () => {
+    updateDragState(null);
+    updateDrawingState(null);
   };
 
   const preview = drawing
@@ -165,24 +204,25 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={finishPointer}
-          onPointerCancel={finishPointer}
+          onPointerCancel={cancelPointer}
           aria-label={`${image.name} 라벨 편집 캔버스`}
         >
           <image href={image.url} width={image.width} height={image.height} />
           {image.annotations.map((annotation) => {
             const selected = annotation.id === props.selectedId;
+            const box = drag?.annotationId === annotation.id ? drag.current : annotation;
             const labelClass = classById.get(annotation.classId);
             const color = labelClass?.color ?? "#99c2a2";
             const label = `${labelClass?.name ?? annotation.label}${annotation.score == null ? "" : ` ${Math.round(annotation.score * 100)}%`}`;
             const labelWidth = Math.max(fontSize * 3, label.length * fontSize * 0.57 + fontSize);
-            const labelY = Math.max(0, annotation.y1 - fontSize * 1.55);
+            const labelY = Math.max(0, box.y1 - fontSize * 1.55);
             return (
               <g key={annotation.id}>
                 <rect
-                  x={annotation.x1}
-                  y={annotation.y1}
-                  width={annotation.x2 - annotation.x1}
-                  height={annotation.y2 - annotation.y1}
+                  x={box.x1}
+                  y={box.y1}
+                  width={box.x2 - box.x1}
+                  height={box.y2 - box.y1}
                   fill={selected ? `${color}24` : `${color}12`}
                   stroke={color}
                   strokeWidth={selected ? 3 : 2}
@@ -190,9 +230,9 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
                   strokeDasharray={selected ? `${handleSize * 1.4} ${handleSize}` : undefined}
                   onPointerDown={(event) => beginDrag(event, annotation, "move")}
                 />
-                <rect x={annotation.x1} y={labelY} width={labelWidth} height={fontSize * 1.55} rx={fontSize * 0.22} fill={color} />
+                <rect x={box.x1} y={labelY} width={labelWidth} height={fontSize * 1.55} rx={fontSize * 0.22} fill={color} />
                 <text
-                  x={annotation.x1 + fontSize * 0.45}
+                  x={box.x1 + fontSize * 0.45}
                   y={labelY + fontSize * 1.08}
                   fill="#101411"
                   fontFamily="Geist Mono, monospace"
@@ -203,10 +243,10 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
                   {label}
                 </text>
                 {selected && ([
-                  ["nw", annotation.x1, annotation.y1],
-                  ["ne", annotation.x2, annotation.y1],
-                  ["sw", annotation.x1, annotation.y2],
-                  ["se", annotation.x2, annotation.y2],
+                  ["nw", box.x1, box.y1],
+                  ["ne", box.x2, box.y1],
+                  ["sw", box.x1, box.y2],
+                  ["se", box.x2, box.y2],
                 ] as const).map(([mode, x, y]) => (
                   <rect
                     key={mode}
@@ -249,4 +289,3 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
     </main>
   );
 }
-

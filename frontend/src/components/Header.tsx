@@ -1,4 +1,6 @@
 import {
+  ArrowClockwise,
+  ArrowCounterClockwise,
   BoundingBox,
   CaretLeft,
   CaretRight,
@@ -17,9 +19,13 @@ interface HeaderProps {
   annotationCount: number;
   canRun: boolean;
   running: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
   onPrevious: () => void;
   onNext: () => void;
   onRun: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onExport: () => void;
 }
 
@@ -43,6 +49,13 @@ export function Header(props: HeaderProps) {
         <ToolButton active={props.tool === "draw"} label="박스 B" onClick={() => props.setTool("draw")}>
           <Selection size={16} />
         </ToolButton>
+        <span className="mx-1 h-5 w-px bg-white/8" aria-hidden="true" />
+        <HistoryButton label="실행 취소" shortcut="Ctrl+Z" disabled={!props.canUndo} onClick={props.onUndo}>
+          <ArrowCounterClockwise size={16} />
+        </HistoryButton>
+        <HistoryButton label="다시 실행" shortcut="Ctrl+Y" disabled={!props.canRedo} onClick={props.onRedo}>
+          <ArrowClockwise size={16} />
+        </HistoryButton>
       </div>
 
       <div className="hidden items-center gap-1.5 border-l border-white/8 pl-4 md:flex">
@@ -72,6 +85,27 @@ export function Header(props: HeaderProps) {
   );
 }
 
+function HistoryButton(props: {
+  label: string;
+  shortcut: string;
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="grid size-8 place-items-center rounded-lg text-[#8c958d] transition hover:bg-white/5 hover:text-[#dbe0da] active:translate-y-px disabled:hover:bg-transparent disabled:hover:text-[#8c958d]"
+      onClick={props.onClick}
+      disabled={props.disabled}
+      aria-label={`${props.label} (${props.shortcut})`}
+      title={`${props.label} · ${props.shortcut}`}
+    >
+      {props.children}
+    </button>
+  );
+}
+
 function ToolButton(props: {
   active: boolean;
   label: string;
@@ -90,4 +124,3 @@ function ToolButton(props: {
     </button>
   );
 }
-
