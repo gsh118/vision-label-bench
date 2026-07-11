@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lb-tool"
+version = "0.1.0"
+description = "Local-first semi-automatic object detection labeling workbench"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "numpy>=2.0,<3",
+  "pillow>=11,<13",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+yolo = [
+  "torch==2.11.0",
+  "torchvision==0.26.0",
+  "ultralytics>=8.3,<9",
+]
+detr = [
+  "safetensors>=0.5",
+  "timm>=1.0,<2",
+  "torch==2.11.0",
+  "transformers>=4.50,<6",
+]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+lb-tool = "lb_tool.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/lb_tool"]
+
+[tool.uv]
+cache-dir = ".uv-cache"
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
