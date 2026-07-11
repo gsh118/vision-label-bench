@@ -1,6 +1,8 @@
 import {
   CheckCircle,
   Cpu,
+  FilePlus,
+  FloppyDisk,
   FolderOpen,
   ImageSquare,
   Info,
@@ -9,7 +11,7 @@ import {
   WarningCircle,
 } from "@phosphor-icons/react";
 import { useRef } from "react";
-import type { HealthResponse, ModelConfig, SessionImage } from "../types";
+import type { HealthResponse, ModelConfig, ProjectSaveStatus, SessionImage } from "../types";
 
 interface SessionRailProps {
   images: SessionImage[];
@@ -18,7 +20,13 @@ interface SessionRailProps {
   health: HealthResponse | null;
   modelStatus: "idle" | "loading" | "ready" | "error";
   modelMessage: string;
+  projectStatus: ProjectSaveStatus;
+  projectMessage: string;
+  projectBusy: boolean;
   onFiles: (files: FileList | File[]) => void;
+  onNewProject: () => void;
+  onOpenProject: (file: File) => void;
+  onSaveProject: () => void;
   onSelect: (id: string) => void;
   onModelChange: (patch: Partial<ModelConfig>) => void;
   onLoadModel: () => void;
@@ -31,8 +39,45 @@ interface SessionRailProps {
 
 export function SessionRail(props: SessionRailProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const projectInputRef = useRef<HTMLInputElement>(null);
   return (
     <aside className="scrollbar-thin flex min-h-0 w-full flex-col overflow-y-auto border-r border-white/8 bg-[#141715] md:w-[264px] md:shrink-0">
+      <section className="border-b border-white/8 p-4">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="section-label"><FloppyDisk size={13} /> 프로젝트</span>
+          <ProjectState status={props.projectStatus} />
+        </div>
+        <p
+          className={`mb-3 truncate text-[9px] leading-4 ${props.projectStatus === "error" ? "text-[#dba59d]" : "text-[#687169]"}`}
+          title={props.projectMessage}
+          aria-live="polite"
+        >
+          {props.projectMessage}
+        </p>
+        <input
+          ref={projectInputRef}
+          type="file"
+          accept=".vlb.json,application/json"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) props.onOpenProject(file);
+            event.target.value = "";
+          }}
+        />
+        <div className="grid grid-cols-3 gap-1.5">
+          <button className="secondary-button justify-center px-2" onClick={props.onNewProject} disabled={props.projectBusy} title="새 프로젝트">
+            <FilePlus size={14} /> 새 작업
+          </button>
+          <button className="secondary-button justify-center px-2" onClick={() => projectInputRef.current?.click()} disabled={props.projectBusy} title="프로젝트 백업 열기">
+            <FolderOpen size={14} /> 열기
+          </button>
+          <button className="secondary-button justify-center px-2" onClick={props.onSaveProject} disabled={props.projectBusy || props.images.length === 0} title="프로젝트 백업 저장">
+            <FloppyDisk size={14} /> 저장
+          </button>
+        </div>
+      </section>
+
       <section className="border-b border-white/8 p-4">
         <div className="mb-3 flex items-center justify-between">
           <span className="section-label"><Cpu size={13} /> 모델</span>
@@ -187,4 +232,12 @@ function ImageState({ status }: { status: SessionImage["status"] }) {
   if (status === "ready") return <CheckCircle size={14} className="text-[#99c2a2]" weight="fill" />;
   if (status === "error") return <WarningCircle size={14} className="text-[#d18d83]" weight="fill" />;
   return <span className="size-1.5 rounded-full bg-[#505750]" />;
+}
+
+function ProjectState({ status }: { status: ProjectSaveStatus }) {
+  if (status === "restoring" || status === "saving") {
+    return <span className="h-1.5 w-5 animate-pulse rounded-full bg-[#758278]" aria-hidden="true" />;
+  }
+  if (status === "error") return <WarningCircle size={14} className="text-[#d18d83]" weight="fill" />;
+  return <CheckCircle size={14} className="text-[#99c2a2]" weight="fill" />;
 }

@@ -2,6 +2,7 @@ export type AdapterKind = "auto" | "yolo" | "detr";
 export type DeviceKind = "auto" | "cpu" | "cuda";
 export type ToolKind = "select" | "draw";
 export type ExportFormat = "yolo" | "coco" | "voc";
+export type ProjectSaveStatus = "restoring" | "saving" | "saved" | "error";
 
 export interface ModelConfig {
   adapter: AdapterKind;

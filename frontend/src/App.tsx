@@ -6,6 +6,14 @@ import { ModelBrowser } from "./components/ModelBrowser";
 import { ModelInfoPanel } from "./components/ModelInfoPanel";
 import { SessionRail } from "./components/SessionRail";
 import { exportAnnotations, getHealth, inferImage, loadModel } from "./lib/api";
+import { downloadProjectBackup, readProjectBackup } from "./lib/projectBackup";
+import type { HydratedProject, ProjectState } from "./lib/projectDocument";
+import {
+  clearLocalProject,
+  loadLocalProject,
+  requestPersistentProjectStorage,
+  saveLocalProject,
+} from "./lib/projectStore";
 import type {
   Annotation,
   BoxCoordinates,
@@ -14,27 +22,30 @@ import type {
   LabelClass,
   ModelConfig,
   ModelInspection,
+  ProjectSaveStatus,
   SessionImage,
   ToolKind,
 } from "./types";
 
 const PALETTE = ["#99c2a2", "#d0ad78", "#82a9bd", "#d08f88", "#aaa0c2", "#b9bd79", "#d09caf", "#80b9ad"];
+const DEFAULT_CLASSES: LabelClass[] = [{ id: 0, name: "object", color: PALETTE[0] }];
+const DEFAULT_MODEL_CONFIG: ModelConfig = {
+  adapter: "auto",
+  modelRef: "yolo11n.pt",
+  device: "auto",
+  confidence: 0.25,
+  iou: 0.7,
+};
 
 export default function App() {
   const [images, setImages] = useState<SessionImage[]>([]);
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
-  const [classes, setClasses] = useState<LabelClass[]>([{ id: 0, name: "object", color: PALETTE[0] }]);
+  const [classes, setClasses] = useState<LabelClass[]>(() => DEFAULT_CLASSES.map((item) => ({ ...item })));
   const [tool, setTool] = useState<ToolKind>("select");
   const [zoom, setZoom] = useState(1);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [modelConfig, setModelConfig] = useState<ModelConfig>({
-    adapter: "auto",
-    modelRef: "yolo11n.pt",
-    device: "auto",
-    confidence: 0.25,
-    iou: 0.7,
-  });
+  const [modelConfig, setModelConfig] = useState<ModelConfig>(() => ({ ...DEFAULT_MODEL_CONFIG }));
   const [modelStatus, setModelStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [modelMessage, setModelMessage] = useState("");
   const [modelBrowserOpen, setModelBrowserOpen] = useState(false);
@@ -46,24 +57,123 @@ export default function App() {
   const [includeConfidence, setIncludeConfidence] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [projectReady, setProjectReady] = useState(false);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [projectStatus, setProjectStatus] = useState<ProjectSaveStatus>("restoring");
+  const [projectMessage, setProjectMessage] = useState("이전 로컬 작업을 확인하는 중");
   const imagesRef = useRef(images);
+  const autosaveRevisionRef = useRef(0);
+  const storageRequestedRef = useRef(false);
   imagesRef.current = images;
 
+  const replaceSessionImages = useCallback((nextImages: SessionImage[]) => {
+    const previousImages = imagesRef.current;
+    imagesRef.current = nextImages;
+    setImages(nextImages);
+    for (const image of previousImages) URL.revokeObjectURL(image.url);
+  }, []);
+
+  const applyProject = useCallback((project: HydratedProject) => {
+    replaceSessionImages(project.images);
+    setSelectedImageId(project.selectedImageId);
+    setSelectedAnnotationId(null);
+    setClasses(project.classes);
+    setModelConfig(project.modelConfig);
+    setZoom(project.preferences.zoom);
+    setExportFormat(project.preferences.exportFormat);
+    setExportScope(project.preferences.exportScope);
+    setIncludeConfidence(project.preferences.includeConfidence);
+    setTool("select");
+    setModelStatus("idle");
+    setModelMessage("");
+    setModelInspection(null);
+    setModelInfoOpen(false);
+    setExportError("");
+  }, [replaceSessionImages]);
+
   useEffect(() => {
-    getHealth().then(setHealth).catch(() => setHealth(null));
+    let active = true;
+    getHealth().then((result) => active && setHealth(result)).catch(() => active && setHealth(null));
     return () => {
+      active = false;
       for (const image of imagesRef.current) URL.revokeObjectURL(image.url);
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadLocalProject()
+      .then((project) => {
+        if (!active) {
+          if (project) for (const image of project.images) URL.revokeObjectURL(image.url);
+          return;
+        }
+        if (project) {
+          applyProject(project);
+          setProjectMessage(`이전 작업 복구됨 · 이미지 ${project.images.length}장`);
+        } else {
+          setProjectMessage("로컬 자동 저장 준비됨");
+        }
+        setProjectStatus("saved");
+      })
+      .catch((error) => {
+        if (!active) return;
+        setProjectStatus("error");
+        setProjectMessage(error instanceof Error ? error.message : "이전 작업을 복구하지 못했습니다.");
+      })
+      .finally(() => active && setProjectReady(true));
+    return () => {
+      active = false;
+    };
+  }, [applyProject]);
 
   const currentIndex = Math.max(0, images.findIndex((item) => item.id === selectedImageId));
   const currentImage = images[currentIndex] ?? null;
   const selectedAnnotation = currentImage?.annotations.find((item) => item.id === selectedAnnotationId) ?? null;
 
+  const createCurrentProjectState = useCallback((): ProjectState => ({
+    modelConfig,
+    classes,
+    images,
+    selectedImageId,
+    preferences: {
+      zoom,
+      exportFormat,
+      exportScope,
+      includeConfidence,
+    },
+  }), [classes, exportFormat, exportScope, images, includeConfidence, modelConfig, selectedImageId, zoom]);
+
+  useEffect(() => {
+    if (!projectReady) return;
+    const revision = ++autosaveRevisionRef.current;
+    const snapshot = createCurrentProjectState();
+    setProjectStatus("saving");
+    setProjectMessage("변경사항을 로컬에 저장하는 중");
+    const timer = window.setTimeout(() => {
+      saveLocalProject(snapshot)
+        .then(() => {
+          if (revision !== autosaveRevisionRef.current) return;
+          setProjectStatus("saved");
+          setProjectMessage(`자동 저장됨 · ${formatClock(new Date())}`);
+        })
+        .catch((error) => {
+          if (revision !== autosaveRevisionRef.current) return;
+          setProjectStatus("error");
+          setProjectMessage(error instanceof Error ? error.message : "로컬 자동 저장에 실패했습니다.");
+        });
+    }, 850);
+    return () => window.clearTimeout(timer);
+  }, [createCurrentProjectState, projectReady]);
+
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const accepted = Array.from(files).filter((file) => file.type.startsWith("image/"));
     const loaded = await Promise.all(accepted.map(readSessionImage));
     if (!loaded.length) return;
+    if (!storageRequestedRef.current) {
+      storageRequestedRef.current = true;
+      void requestPersistentProjectStorage();
+    }
     setImages((previous) => [...previous, ...loaded]);
     setSelectedImageId((previous) => previous ?? loaded[0].id);
     setSelectedAnnotationId(null);
@@ -234,6 +344,77 @@ export default function App() {
     });
   };
 
+  const newProject = () => {
+    if (imagesRef.current.length && !window.confirm("현재 작업을 닫고 새 프로젝트를 시작할까요? 자동 저장된 작업도 교체됩니다.")) return;
+    autosaveRevisionRef.current += 1;
+    replaceSessionImages([]);
+    setSelectedImageId(null);
+    setSelectedAnnotationId(null);
+    setClasses(DEFAULT_CLASSES.map((item) => ({ ...item })));
+    setModelConfig({ ...DEFAULT_MODEL_CONFIG });
+    setZoom(1);
+    setExportFormat("yolo");
+    setExportScope("all");
+    setIncludeConfidence(false);
+    setTool("select");
+    setModelStatus("idle");
+    setModelMessage("");
+    setModelInspection(null);
+    setModelInfoOpen(false);
+    setExportError("");
+    setProjectStatus("saving");
+    setProjectMessage("새 프로젝트를 준비하는 중");
+    void clearLocalProject()
+      .then(() => {
+        setProjectStatus("saved");
+        setProjectMessage("새 프로젝트 · 자동 저장 준비됨");
+      })
+      .catch((error) => {
+        setProjectStatus("error");
+        setProjectMessage(error instanceof Error ? error.message : "기존 자동 저장을 지우지 못했습니다.");
+      });
+  };
+
+  const openProject = async (file: File) => {
+    if (projectBusy) return;
+    if (imagesRef.current.length && !window.confirm("현재 작업을 닫고 선택한 프로젝트를 열까요?")) return;
+    setProjectBusy(true);
+    setProjectStatus("restoring");
+    setProjectMessage(`${file.name} 읽는 중`);
+    try {
+      const project = await readProjectBackup(file);
+      applyProject(project);
+      await saveLocalProject(project);
+      autosaveRevisionRef.current += 1;
+      setProjectStatus("saved");
+      setProjectMessage(`프로젝트 열림 · 이미지 ${project.images.length}장`);
+    } catch (error) {
+      setProjectStatus("error");
+      setProjectMessage(error instanceof Error ? error.message : "프로젝트를 열지 못했습니다.");
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const saveProject = useCallback(async () => {
+    if (projectBusy || !images.length) return;
+    setProjectBusy(true);
+    setProjectStatus("saving");
+    setProjectMessage("휴대용 프로젝트 백업을 만드는 중");
+    try {
+      const snapshot = createCurrentProjectState();
+      await saveLocalProject(snapshot);
+      const filename = await downloadProjectBackup(snapshot);
+      setProjectStatus("saved");
+      setProjectMessage(`${filename} 저장됨`);
+    } catch (error) {
+      setProjectStatus("error");
+      setProjectMessage(error instanceof Error ? error.message : "프로젝트 백업을 만들지 못했습니다.");
+    } finally {
+      setProjectBusy(false);
+    }
+  }, [createCurrentProjectState, images.length, projectBusy]);
+
   const doExport = async () => {
     const selectedImages = exportScope === "current" && currentImage ? [currentImage] : images;
     if (!selectedImages.length) return;
@@ -250,6 +431,12 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.repeat) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void saveProject();
+        return;
+      }
       const tag = (event.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if ((event.key === "Delete" || event.key === "Backspace") && selectedAnnotationId) {
@@ -267,7 +454,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [deleteAnnotation, selectByOffset, selectedAnnotationId]);
+  }, [deleteAnnotation, saveProject, selectByOffset, selectedAnnotationId]);
 
   const running = currentImage?.status === "running";
   const classList = useMemo(() => [...classes].sort((a, b) => a.id - b.id), [classes]);
@@ -295,7 +482,13 @@ export default function App() {
           health={health}
           modelStatus={modelStatus}
           modelMessage={modelMessage}
+          projectStatus={projectStatus}
+          projectMessage={projectMessage}
+          projectBusy={projectBusy}
           onFiles={addFiles}
+          onNewProject={newProject}
+          onOpenProject={(file) => void openProject(file)}
+          onSaveProject={() => void saveProject()}
           onSelect={(id) => { setSelectedImageId(id); setSelectedAnnotationId(null); }}
           onModelChange={(patch) => {
             setModelConfig((config) => ({ ...config, ...patch }));
@@ -391,4 +584,13 @@ async function readSessionImage(file: File): Promise<SessionImage> {
     annotations: [],
     error: null,
   };
+}
+
+function formatClock(date: Date): string {
+  return new Intl.DateTimeFormat("ko-KR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
