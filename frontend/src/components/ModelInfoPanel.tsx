@@ -1,6 +1,9 @@
 import {
+  Check,
   CheckCircle,
+  Copy,
   Cpu,
+  DownloadSimple,
   File as FileIcon,
   Gauge,
   Info,
@@ -11,7 +14,11 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
-import type { ModelInspection } from "../types";
+import {
+  inferenceManifestFilename,
+  stringifyInferenceManifest,
+} from "../lib/inferenceManifest";
+import type { InferenceTrace, ModelInspection } from "../types";
 
 interface ModelInfoPanelProps {
   open: boolean;
@@ -25,6 +32,7 @@ interface ModelInfoPanelProps {
 
 export function ModelInfoPanel(props: ModelInfoPanelProps) {
   const [classFilter, setClassFilter] = useState("");
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
 
   useEffect(() => {
     if (!props.open) return;
@@ -36,7 +44,10 @@ export function ModelInfoPanel(props: ModelInfoPanelProps) {
   }, [props.onClose, props.open]);
 
   useEffect(() => {
-    if (props.open) setClassFilter("");
+    if (props.open) {
+      setClassFilter("");
+      setCopyStatus("idle");
+    }
   }, [props.open, props.inspection?.model.model_ref]);
 
   const classes = useMemo(() => {
@@ -54,6 +65,28 @@ export function ModelInfoPanel(props: ModelInfoPanelProps) {
   const model = inspection?.model;
   const verified = Boolean(inspection?.inference);
   const displayName = model?.model_type || model?.model_ref.split(/[\\/]/).pop() || "Model";
+  const manifestText = inspection ? stringifyInferenceManifest(inspection) : null;
+
+  const copyManifest = async () => {
+    if (!manifestText || !navigator.clipboard) return setCopyStatus("error");
+    try {
+      await navigator.clipboard.writeText(manifestText);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
+  };
+
+  const downloadManifest = () => {
+    if (!inspection || !manifestText) return;
+    const blob = new Blob([manifestText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = inferenceManifestFilename(inspection);
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
 
   return (
     <div
@@ -141,6 +174,44 @@ export function ModelInfoPanel(props: ModelInfoPanelProps) {
                   <SpecRow label="파일 크기" value={model.file_size == null ? null : formatBytes(model.file_size)} />
                 </dl>
               </section>
+
+              {inspection.inference && (
+                <section className="border-b border-white/8 px-5 py-4">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="section-label">추론 재현 정보</span>
+                      <p className="mt-1 text-[9px] text-[#667067]">Colab·Roboflow 결과 비교에 필요한 실제 실행 조건입니다.</p>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[9px] ${copyStatus === "error" ? "text-[#dba59d]" : "text-[#829084]"}`} aria-live="polite">
+                        {copyStatus === "copied" ? "복사됨" : copyStatus === "error" ? "복사 실패" : ""}
+                      </span>
+                      <button className="secondary-button px-2.5" type="button" onClick={() => void copyManifest()}>
+                        {copyStatus === "copied" ? <Check size={14} /> : <Copy size={14} />} JSON 복사
+                      </button>
+                      <button className="secondary-button px-2.5" type="button" onClick={downloadManifest}>
+                        <DownloadSimple size={14} /> 저장
+                      </button>
+                    </div>
+                  </div>
+                  <dl className="grid grid-cols-1 divide-y divide-white/7 rounded-[10px] border border-white/7 bg-[#101310] px-3 sm:grid-cols-2 sm:gap-x-6 sm:divide-y-0">
+                    <SpecRow label="원본 → 처리" value={`${inspection.inference.trace.source_width} × ${inspection.inference.trace.source_height} → ${inspection.inference.trace.processed_width} × ${inspection.inference.trace.processed_height}`} />
+                    <SpecRow label="색상" value={`${inspection.inference.trace.source_color_mode} → ${inspection.inference.trace.processed_color_mode}`} />
+                    <SpecRow label="입력 설정" value={inspection.inference.trace.configured_input_size} />
+                    <SpecRow label="전처리" value={inspection.inference.trace.preprocessing} />
+                    <SpecRow label="Confidence" value={inspection.inference.trace.confidence.toFixed(2)} />
+                    <SpecRow label="NMS IoU" value={inspection.inference.trace.nms_applied ? inspection.inference.trace.iou?.toFixed(2) ?? "—" : "미적용"} />
+                    <SpecRow label="장치" value={`${inspection.inference.trace.requested_device} → ${inspection.inference.trace.resolved_device}`} />
+                    <SpecRow label="EXIF 회전" value={inspection.inference.trace.exif_transposed ? `적용 (${inspection.inference.trace.exif_orientation})` : "없음"} />
+                    <SpecRow label="검출 분포" value={formatClassCounts(inspection.inference.trace.class_counts)} />
+                    <SpecRow label="점수 범위" value={formatScoreRange(inspection.inference.trace)} />
+                    <div className="grid grid-cols-[92px_1fr] items-center gap-3 border-b border-white/7 py-2.5 sm:col-span-2 sm:border-b-0">
+                      <dt className="text-[9px] text-[#687168]">이미지 SHA-256</dt>
+                      <dd className="truncate text-right font-mono text-[9px] text-[#8f998f]" title={inspection.inference.trace.image_sha256}>{inspection.inference.trace.image_sha256}</dd>
+                    </div>
+                  </dl>
+                </section>
+              )}
 
               <section className="p-5">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
@@ -234,4 +305,14 @@ function formatBytes(value: number): string {
 
 function formatDuration(value: number): string {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(0)} ms`;
+}
+
+function formatClassCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts);
+  return entries.length ? entries.map(([id, count]) => `${id}:${count}`).join(" · ") : "없음";
+}
+
+function formatScoreRange(trace: InferenceTrace): string {
+  if (trace.score_min == null || trace.score_max == null || trace.score_mean == null) return "—";
+  return `${trace.score_min.toFixed(3)}–${trace.score_max.toFixed(3)} · 평균 ${trace.score_mean.toFixed(3)}`;
 }

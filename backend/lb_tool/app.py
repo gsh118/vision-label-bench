@@ -4,13 +4,16 @@ import importlib.util
 import ipaddress
 import io
 import time
+from collections import Counter
+from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from lb_tool import __version__
 from lb_tool.adapters import DetectorRegistry
@@ -21,6 +24,7 @@ from lb_tool.schemas import (
     AdapterKind,
     DeviceKind,
     ExportRequest,
+    InferenceTrace,
     InferenceResponse,
     ModelBrowseResponse,
     ModelLoadResponse,
@@ -95,7 +99,8 @@ def create_app(registry: DetectorRegistry | None = None) -> FastAPI:
         confidence: float = Form(0.25, ge=0.01, le=1.0),
         iou: float = Form(0.7, ge=0.01, le=1.0),
     ) -> InferenceResponse:
-        pil_image = _read_image(image)
+        decoded = _read_image(image)
+        pil_image = decoded.image
         spec = ModelSpec(adapter=adapter, model_ref=model_ref, device=device)
         started = time.perf_counter()
         try:
@@ -103,12 +108,45 @@ def create_app(registry: DetectorRegistry | None = None) -> FastAPI:
         except DetectorError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         elapsed_ms = (time.perf_counter() - started) * 1000
+        scores = [detection.score for detection in batch.detections]
+        class_counts = dict(
+            sorted(Counter(detection.class_id for detection in batch.detections).items())
+        )
+        is_yolo = model.adapter == "yolo"
         return InferenceResponse(
             width=batch.width,
             height=batch.height,
             elapsed_ms=elapsed_ms,
             model=model,
             detections=batch.detections,
+            trace=InferenceTrace(
+                image_name=Path(image.filename or "image").name,
+                image_sha256=decoded.sha256,
+                content_type=image.content_type,
+                source_width=decoded.source_width,
+                source_height=decoded.source_height,
+                processed_width=pil_image.width,
+                processed_height=pil_image.height,
+                source_color_mode=decoded.source_color_mode,
+                exif_orientation=decoded.exif_orientation,
+                exif_transposed=decoded.exif_transposed,
+                preprocessing=(
+                    "PIL EXIF transpose → RGB → Ultralytics letterbox"
+                    if is_yolo
+                    else "PIL EXIF transpose → RGB → AutoImageProcessor"
+                ),
+                configured_input_size=model.input_size,
+                confidence=confidence,
+                iou=iou if is_yolo else None,
+                nms_applied=is_yolo,
+                requested_device=device,
+                resolved_device=model.device,
+                detection_count=len(batch.detections),
+                class_counts=class_counts,
+                score_min=min(scores) if scores else None,
+                score_max=max(scores) if scores else None,
+                score_mean=sum(scores) / len(scores) if scores else None,
+            ),
         )
 
     @app.post("/api/export")
@@ -134,18 +172,44 @@ def create_app(registry: DetectorRegistry | None = None) -> FastAPI:
     return app
 
 
-def _read_image(upload: UploadFile) -> Image.Image:
+@dataclass(frozen=True)
+class _DecodedImage:
+    image: Image.Image
+    sha256: str
+    source_width: int
+    source_height: int
+    source_color_mode: str
+    exif_orientation: int | None
+    exif_transposed: bool
+
+
+def _read_image(upload: UploadFile) -> _DecodedImage:
     data = upload.file.read(MAX_UPLOAD_BYTES + 1)
     if not data:
         raise HTTPException(status_code=400, detail="빈 이미지 파일입니다.")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="이미지는 50MB 이하여야 합니다.")
     try:
-        image = Image.open(io.BytesIO(data))
-        image.load()
-        if image.width * image.height > MAX_IMAGE_PIXELS:
-            raise HTTPException(status_code=413, detail="이미지 해상도가 너무 큽니다.")
-        return image.convert("RGB")
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise HTTPException(status_code=413, detail="이미지 해상도가 너무 큽니다.")
+            source_width, source_height = image.size
+            source_color_mode = image.mode
+            raw_orientation = image.getexif().get(274)
+            exif_orientation = int(raw_orientation) if raw_orientation is not None else None
+            exif_transposed = exif_orientation not in (None, 1)
+            converted = ImageOps.exif_transpose(image).convert("RGB")
+            converted.load()
+        return _DecodedImage(
+            image=converted,
+            sha256=sha256(data).hexdigest(),
+            source_width=source_width,
+            source_height=source_height,
+            source_color_mode=source_color_mode,
+            exif_orientation=exif_orientation,
+            exif_transposed=exif_transposed,
+        )
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=400, detail="지원되는 이미지 파일이 아닙니다.") from exc
 

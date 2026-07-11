@@ -78,7 +78,35 @@ export interface ModelInspection {
     imageName: string;
     detectionCount: number;
     elapsedMs: number;
+    capturedAt: string;
+    trace: InferenceTrace;
   } | null;
+}
+
+export interface InferenceTrace {
+  image_name: string;
+  image_sha256: string;
+  content_type: string | null;
+  source_width: number;
+  source_height: number;
+  processed_width: number;
+  processed_height: number;
+  source_color_mode: string;
+  processed_color_mode: "RGB";
+  exif_orientation: number | null;
+  exif_transposed: boolean;
+  preprocessing: string;
+  configured_input_size: string | null;
+  confidence: number;
+  iou: number | null;
+  nms_applied: boolean;
+  requested_device: DeviceKind;
+  resolved_device: string;
+  detection_count: number;
+  class_counts: Record<string, number>;
+  score_min: number | null;
+  score_max: number | null;
+  score_mean: number | null;
 }
 
 export interface ModelBrowseEntry {
@@ -101,6 +129,7 @@ export interface InferenceResponse {
   height: number;
   elapsed_ms: number;
   model: ModelInfo;
+  trace: InferenceTrace;
   detections: Array<{
     class_id: number;
     label: string;

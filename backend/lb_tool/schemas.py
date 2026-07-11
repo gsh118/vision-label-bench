@@ -76,12 +76,39 @@ class Detection(BaseModel):
         return self
 
 
+class InferenceTrace(BaseModel):
+    image_name: str
+    image_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_type: str | None = None
+    source_width: int = Field(gt=0)
+    source_height: int = Field(gt=0)
+    processed_width: int = Field(gt=0)
+    processed_height: int = Field(gt=0)
+    source_color_mode: str
+    processed_color_mode: Literal["RGB"] = "RGB"
+    exif_orientation: int | None = None
+    exif_transposed: bool
+    preprocessing: str
+    configured_input_size: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    iou: float | None = Field(default=None, ge=0, le=1)
+    nms_applied: bool
+    requested_device: DeviceKind
+    resolved_device: str
+    detection_count: int = Field(ge=0)
+    class_counts: dict[int, int]
+    score_min: float | None = Field(default=None, ge=0, le=1)
+    score_max: float | None = Field(default=None, ge=0, le=1)
+    score_mean: float | None = Field(default=None, ge=0, le=1)
+
+
 class InferenceResponse(BaseModel):
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     elapsed_ms: float = Field(ge=0)
     model: ModelInfo
     detections: list[Detection]
+    trace: InferenceTrace
 
 
 class ExportFormat(StrEnum):

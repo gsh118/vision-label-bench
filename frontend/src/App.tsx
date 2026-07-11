@@ -307,6 +307,8 @@ export default function App() {
           imageName: image.name,
           detectionCount: response.detections.length,
           elapsedMs: response.elapsed_ms,
+          capturedAt: new Date().toISOString(),
+          trace: response.trace,
         },
       }));
     } catch (error) {
