@@ -16,6 +16,7 @@ const first: Annotation = {
   label: "object",
   score: null,
   source: "manual",
+  reviewState: "accepted",
   x1: 10,
   y1: 20,
   x2: 80,
@@ -67,6 +68,7 @@ describe("annotation history", () => {
   });
 
   it("treats an entire move or resize gesture as one command", () => {
+    const suggested = { ...first, source: "model" as const, reviewState: "suggested" as const, score: 0.72 };
     const command: AnnotationCommand = {
       kind: "box",
       imageId: "image-a",
@@ -74,35 +76,44 @@ describe("annotation history", () => {
       gesture: "move",
       before: { x1: 10, y1: 20, x2: 80, y2: 90 },
       after: { x1: 44, y1: 51, x2: 114, y2: 121 },
+      reviewBefore: "suggested",
+      reviewAfter: "edited",
       selectionBefore: first.id,
       selectionAfter: first.id,
     };
-    const executed = execute({}, [first], command);
+    const executed = execute({}, [suggested], command);
     const undone = undoAnnotationCommand(executed.history, "image-a", executed.annotations)!;
 
     expect(executed.history["image-a"].past).toHaveLength(1);
+    expect(executed.annotations[0].reviewState).toBe("edited");
     expect(undone.annotations[0]).toMatchObject({ x1: 10, y1: 20, x2: 80, y2: 90 });
+    expect(undone.annotations[0].reviewState).toBe("suggested");
   });
 
   it("restores class id and label together", () => {
+    const suggested = { ...first, source: "model" as const, reviewState: "suggested" as const, score: 0.68 };
     const command: AnnotationCommand = {
       kind: "class",
       imageId: "image-a",
       annotationId: first.id,
       before: { classId: 0, label: "object" },
       after: { classId: 7, label: "fastener" },
+      reviewBefore: "suggested",
+      reviewAfter: "edited",
       selectionBefore: first.id,
       selectionAfter: first.id,
     };
-    const executed = execute({}, [first], command);
+    const executed = execute({}, [suggested], command);
     const undone = undoAnnotationCommand(executed.history, "image-a", executed.annotations)!;
 
     expect(executed.annotations[0]).toMatchObject({ classId: 7, label: "fastener" });
+    expect(executed.annotations[0].reviewState).toBe("edited");
     expect(undone.annotations[0]).toMatchObject({ classId: 0, label: "object" });
+    expect(undone.annotations[0].reviewState).toBe("suggested");
   });
 
   it("undoes inference replacement as one atomic edit", () => {
-    const predicted = [{ ...second, id: "prediction", source: "model" as const, score: 0.61 }];
+    const predicted = [{ ...second, id: "prediction", source: "model" as const, score: 0.61, reviewState: "suggested" as const }];
     const command: AnnotationCommand = {
       kind: "replace-all",
       imageId: "image-a",
@@ -149,6 +160,8 @@ describe("annotation history", () => {
       gesture: "resize",
       before: first,
       after: first,
+      reviewBefore: "suggested",
+      reviewAfter: "edited",
       selectionBefore: first.id,
       selectionAfter: first.id,
     };
@@ -163,6 +176,43 @@ describe("annotation history", () => {
       });
     }
     expect(history["image-a"].past).toHaveLength(100);
+  });
+
+  it("treats bulk review as one replace-all step", () => {
+    const pending = { ...first, source: "model" as const, reviewState: "suggested" as const, score: 0.64 };
+    const accepted = { ...pending, reviewState: "accepted" as const };
+    const command: AnnotationCommand = {
+      kind: "replace-all",
+      imageId: "image-a",
+      before: [pending, second],
+      after: [accepted, second],
+      selectionBefore: pending.id,
+      selectionAfter: null,
+    };
+    const executed = execute({}, [pending, second], command);
+    const undone = undoAnnotationCommand(executed.history, "image-a", executed.annotations)!;
+
+    expect(executed.history["image-a"].past).toHaveLength(1);
+    expect(executed.annotations[0].reviewState).toBe("accepted");
+    expect(undone.annotations[0].reviewState).toBe("suggested");
+  });
+
+  it("accepts a model suggestion and restores its pending state on undo", () => {
+    const suggested = { ...first, source: "model" as const, reviewState: "suggested" as const, score: 0.72 };
+    const command: AnnotationCommand = {
+      kind: "review",
+      imageId: "image-a",
+      annotationId: suggested.id,
+      before: "suggested",
+      after: "accepted",
+      selectionBefore: suggested.id,
+      selectionAfter: suggested.id,
+    };
+    const executed = execute({}, [suggested], command);
+    const undone = undoAnnotationCommand(executed.history, "image-a", executed.annotations)!;
+
+    expect(executed.annotations[0].reviewState).toBe("accepted");
+    expect(undone.annotations[0].reviewState).toBe("suggested");
   });
 
   it("maps Windows and macOS shortcuts without hijacking text editing", () => {

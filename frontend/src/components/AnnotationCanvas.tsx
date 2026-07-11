@@ -27,6 +27,7 @@ interface AnnotationCanvasProps {
   selectedId: string | null;
   tool: ToolKind;
   zoom: number;
+  reviewFilter: "all" | "pending";
   onSelect: (id: string | null) => void;
   onCommitBox: (id: string, before: BoxCoordinates, after: BoxCoordinates, gesture: "move" | "resize") => void;
   onCreate: (box: BoxCoordinates) => void;
@@ -208,7 +209,9 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
           aria-label={`${image.name} 라벨 편집 캔버스`}
         >
           <image href={image.url} width={image.width} height={image.height} />
-          {image.annotations.map((annotation) => {
+          {image.annotations
+            .filter((annotation) => props.reviewFilter === "all" || annotation.reviewState === "suggested")
+            .map((annotation) => {
             const selected = annotation.id === props.selectedId;
             const box = drag?.annotationId === annotation.id ? drag.current : annotation;
             const labelClass = classById.get(annotation.classId);
@@ -227,7 +230,9 @@ export function AnnotationCanvas(props: AnnotationCanvasProps) {
                   stroke={color}
                   strokeWidth={selected ? 3 : 2}
                   vectorEffect="non-scaling-stroke"
-                  strokeDasharray={selected ? `${handleSize * 1.4} ${handleSize}` : undefined}
+                  strokeDasharray={selected
+                    ? `${handleSize * 1.4} ${handleSize}`
+                    : annotation.reviewState === "suggested" ? `${handleSize * 1.1} ${handleSize * 0.8}` : undefined}
                   onPointerDown={(event) => beginDrag(event, annotation, "move")}
                 />
                 <rect x={box.x1} y={labelY} width={labelWidth} height={fontSize * 1.55} rx={fontSize * 0.22} fill={color} />

@@ -14,6 +14,7 @@ const annotation: Annotation = {
   label: "connector",
   score: 0.83,
   source: "model",
+  reviewState: "suggested",
   x1: 12,
   y1: 14,
   x2: 88,
@@ -40,6 +41,7 @@ function makeState(status: SessionImage["status"] = "running"): ProjectState {
       exportFormat: "coco",
       exportScope: "current",
       includeConfidence: true,
+      includeSuggestions: false,
     },
     images: [{
       id: "image-1",
@@ -106,5 +108,42 @@ describe("project document", () => {
       "images[0].width",
     );
     expect(() => hydrateProjectDocument(document, new Map())).toThrow("이미지 파일을 복구하지 못했습니다");
+  });
+
+  it("migrates legacy v1 labels as accepted without changing old export behavior", () => {
+    const legacy = JSON.parse(JSON.stringify(createProjectDocument(makeState()))) as Record<string, any>;
+    delete legacy.preferences.includeSuggestions;
+    delete legacy.images[0].annotations[0].reviewState;
+
+    const parsed = parseProjectDocument(legacy);
+    expect(parsed.preferences.includeSuggestions).toBe(false);
+    expect(parsed.images[0].annotations[0].reviewState).toBe("accepted");
+  });
+
+  it("round-trips every review state and rejects invalid review settings", () => {
+    const state = makeState();
+    state.images[0].annotations = [
+      { ...annotation, id: "suggested", reviewState: "suggested" },
+      { ...annotation, id: "accepted", reviewState: "accepted" },
+      { ...annotation, id: "edited", reviewState: "edited" },
+    ];
+    const document = createProjectDocument(state);
+    expect(parseProjectDocument(document).images[0].annotations.map((item) => item.reviewState)).toEqual([
+      "suggested",
+      "accepted",
+      "edited",
+    ]);
+
+    expect(() => parseProjectDocument({
+      ...document,
+      preferences: { ...document.preferences, includeSuggestions: "yes" },
+    })).toThrow("검수 전 제안 포함 설정");
+    expect(() => parseProjectDocument({
+      ...document,
+      images: [{
+        ...document.images[0],
+        annotations: [{ ...document.images[0].annotations[0], reviewState: "unknown" }],
+      }],
+    })).toThrow("reviewState");
   });
 });

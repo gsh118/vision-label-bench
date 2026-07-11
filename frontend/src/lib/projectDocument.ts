@@ -14,6 +14,7 @@ export interface ProjectPreferences {
   exportFormat: ExportFormat;
   exportScope: "current" | "all";
   includeConfidence: boolean;
+  includeSuggestions: boolean;
 }
 
 export interface ProjectState {
@@ -199,11 +200,15 @@ function parsePreferences(value: unknown): ProjectPreferences {
   if (typeof value.includeConfidence !== "boolean") {
     throw new ProjectDocumentError("신뢰도 포함 설정이 올바르지 않습니다.");
   }
+  if (value.includeSuggestions !== undefined && typeof value.includeSuggestions !== "boolean") {
+    throw new ProjectDocumentError("검수 전 제안 포함 설정이 올바르지 않습니다.");
+  }
   return {
     zoom: readFiniteNumber(value.zoom, "preferences.zoom", 0.1, 10),
     exportFormat,
     exportScope,
     includeConfidence: value.includeConfidence,
+    includeSuggestions: value.includeSuggestions ?? false,
   };
 }
 
@@ -242,6 +247,10 @@ function parseAnnotation(value: unknown, path: string): Annotation {
   const source = value.source;
   if (source !== "model" && source !== "manual") throw new ProjectDocumentError(`${path}.source 값이 올바르지 않습니다.`);
   const score = value.score === null ? null : readFiniteNumber(value.score, `${path}.score`, 0, 1);
+  const reviewState = value.reviewState ?? "accepted";
+  if (reviewState !== "suggested" && reviewState !== "accepted" && reviewState !== "edited") {
+    throw new ProjectDocumentError(`${path}.reviewState 값이 올바르지 않습니다.`);
+  }
   const x1 = readFiniteNumber(value.x1, `${path}.x1`, 0);
   const y1 = readFiniteNumber(value.y1, `${path}.y1`, 0);
   const x2 = readFiniteNumber(value.x2, `${path}.x2`, 0);
@@ -253,6 +262,7 @@ function parseAnnotation(value: unknown, path: string): Annotation {
     label: readString(value.label, `${path}.label`),
     score,
     source,
+    reviewState,
     x1,
     y1,
     x2,

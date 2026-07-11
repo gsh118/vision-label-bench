@@ -26,6 +26,8 @@ export interface BoxAnnotationCommand extends CommandBase {
   gesture: "move" | "resize";
   before: BoxCoordinates;
   after: BoxCoordinates;
+  reviewBefore: Annotation["reviewState"];
+  reviewAfter: Annotation["reviewState"];
 }
 
 export interface ClassAnnotationCommand extends CommandBase {
@@ -33,6 +35,15 @@ export interface ClassAnnotationCommand extends CommandBase {
   annotationId: string;
   before: { classId: number; label: string };
   after: { classId: number; label: string };
+  reviewBefore: Annotation["reviewState"];
+  reviewAfter: Annotation["reviewState"];
+}
+
+export interface ReviewAnnotationCommand extends CommandBase {
+  kind: "review";
+  annotationId: string;
+  before: Annotation["reviewState"];
+  after: Annotation["reviewState"];
 }
 
 export interface ReplaceAnnotationsCommand extends CommandBase {
@@ -46,6 +57,7 @@ export type AnnotationCommand =
   | DeleteAnnotationCommand
   | BoxAnnotationCommand
   | ClassAnnotationCommand
+  | ReviewAnnotationCommand
   | ReplaceAnnotationsCommand;
 
 export interface ImageAnnotationHistory {
@@ -122,18 +134,29 @@ export function applyAnnotationCommand(
   }
   if (command.kind === "box") {
     const box = forward ? command.after : command.before;
+    const reviewState = forward ? command.reviewAfter : command.reviewBefore;
     return {
       annotations: annotations.map((annotation) => annotation.id === command.annotationId
-        ? { ...annotation, ...box }
+        ? { ...annotation, ...box, reviewState }
         : annotation),
       selection: forward ? command.selectionAfter : command.selectionBefore,
     };
   }
   if (command.kind === "class") {
     const value = forward ? command.after : command.before;
+    const reviewState = forward ? command.reviewAfter : command.reviewBefore;
     return {
       annotations: annotations.map((annotation) => annotation.id === command.annotationId
-        ? { ...annotation, ...value }
+        ? { ...annotation, ...value, reviewState }
+        : annotation),
+      selection: forward ? command.selectionAfter : command.selectionBefore,
+    };
+  }
+  if (command.kind === "review") {
+    const reviewState = forward ? command.after : command.before;
+    return {
+      annotations: annotations.map((annotation) => annotation.id === command.annotationId
+        ? { ...annotation, reviewState }
         : annotation),
       selection: forward ? command.selectionAfter : command.selectionBefore,
     };
@@ -195,6 +218,7 @@ export function isNoopCommand(command: AnnotationCommand): boolean {
   if (command.kind === "class") {
     return command.before.classId === command.after.classId && command.before.label === command.after.label;
   }
+  if (command.kind === "review") return command.before === command.after;
   if (command.kind === "replace-all") return annotationsEqual(command.before, command.after);
   return false;
 }
@@ -209,6 +233,7 @@ function cloneCommand(command: AnnotationCommand): AnnotationCommand {
   if (command.kind === "class") {
     return { ...command, before: { ...command.before }, after: { ...command.after } };
   }
+  if (command.kind === "review") return { ...command };
   return {
     ...command,
     before: command.before.map((annotation) => ({ ...annotation })),
@@ -239,6 +264,7 @@ function annotationsEqual(left: Annotation[], right: Annotation[]): boolean {
       && annotation.label === other.label
       && annotation.score === other.score
       && annotation.source === other.source
+      && annotation.reviewState === other.reviewState
       && boxesEqual(annotation, other);
   });
 }

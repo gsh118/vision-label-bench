@@ -201,7 +201,7 @@ export function SessionRail(props: SessionRailProps) {
                     {index + 1} · {image.annotations.length} BOX
                   </small>
                 </span>
-                <ImageState status={image.status} />
+                <ImageState image={image} />
               </button>
             ))}
           </div>
@@ -227,8 +227,11 @@ function Field(props: { label: string; children: React.ReactNode }) {
   );
 }
 
-function ImageState({ status }: { status: SessionImage["status"] }) {
+function ImageState({ image }: { image: SessionImage }) {
+  const status = image.status;
   if (status === "running") return <span className="size-3 animate-pulse rounded-full bg-[#99c2a2]" />;
+  const pending = image.annotations.filter((annotation) => annotation.reviewState === "suggested").length;
+  if (pending > 0) return <WarningCircle size={14} className="text-[#d0ad78]" weight="fill" aria-label={`검수 필요 ${pending}개`} />;
   if (status === "ready") return <CheckCircle size={14} className="text-[#99c2a2]" weight="fill" />;
   if (status === "error") return <WarningCircle size={14} className="text-[#d18d83]" weight="fill" />;
   return <span className="size-1.5 rounded-full bg-[#505750]" />;

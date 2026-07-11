@@ -24,6 +24,11 @@ import {
   requestPersistentProjectStorage,
   saveLocalProject,
 } from "./lib/projectStore";
+import {
+  acceptAllSuggestions as acceptPendingSuggestions,
+  mergeModelSuggestions,
+  prepareImagesForExport,
+} from "./lib/review";
 import type {
   Annotation,
   BoxCoordinates,
@@ -65,6 +70,8 @@ export default function App() {
   const [exportFormat, setExportFormat] = useState<ExportFormat>("yolo");
   const [exportScope, setExportScope] = useState<"current" | "all">("all");
   const [includeConfidence, setIncludeConfidence] = useState(false);
+  const [includeSuggestions, setIncludeSuggestions] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState<"all" | "pending">("all");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [projectReady, setProjectReady] = useState(false);
@@ -133,6 +140,8 @@ export default function App() {
     setExportFormat(project.preferences.exportFormat);
     setExportScope(project.preferences.exportScope);
     setIncludeConfidence(project.preferences.includeConfidence);
+    setIncludeSuggestions(project.preferences.includeSuggestions);
+    setReviewFilter("all");
     setTool("select");
     setModelStatus("idle");
     setModelMessage("");
@@ -192,8 +201,9 @@ export default function App() {
       exportFormat,
       exportScope,
       includeConfidence,
+      includeSuggestions,
     },
-  }), [classes, exportFormat, exportScope, images, includeConfidence, modelConfig, selectedImageId, zoom]);
+  }), [classes, exportFormat, exportScope, images, includeConfidence, includeSuggestions, modelConfig, selectedImageId, zoom]);
 
   useEffect(() => {
     if (!projectReady) return;
@@ -262,6 +272,7 @@ export default function App() {
         label: item.label,
         score: item.score,
         source: "model",
+        reviewState: "suggested",
         x1: item.x1,
         y1: item.y1,
         x2: item.x2,
@@ -269,11 +280,12 @@ export default function App() {
       }));
       const latestImage = imagesRef.current.find((item) => item.id === image.id);
       if (latestImage) {
+        const mergedAnnotations = mergeModelSuggestions(latestImage.annotations, annotations);
         commitAnnotationCommand({
           kind: "replace-all",
           imageId: image.id,
           before: latestImage.annotations,
-          after: annotations,
+          after: mergedAnnotations,
           selectionBefore: selectedImageIdRef.current === image.id ? selectedAnnotationIdRef.current : null,
           selectionAfter: null,
         });
@@ -347,6 +359,11 @@ export default function App() {
     gesture: "move" | "resize",
   ) => {
     if (!currentImage) return;
+    const annotation = currentImage.annotations.find((item) => item.id === id);
+    if (!annotation) return;
+    const selectionAfter = annotation.reviewState === "suggested" && reviewFilter === "pending"
+      ? currentImage.annotations.find((item) => item.id !== id && item.reviewState === "suggested")?.id ?? null
+      : id;
     commitAnnotationCommand({
       kind: "box",
       imageId: currentImage.id,
@@ -354,8 +371,10 @@ export default function App() {
       gesture,
       before,
       after,
+      reviewBefore: annotation.reviewState,
+      reviewAfter: annotation.reviewState === "suggested" ? "edited" : annotation.reviewState,
       selectionBefore: id,
-      selectionAfter: id,
+      selectionAfter,
     });
   };
 
@@ -368,6 +387,7 @@ export default function App() {
       label: chosenClass.name,
       score: null,
       source: "manual",
+      reviewState: "accepted",
       ...box,
     };
     commitAnnotationCommand({
@@ -379,6 +399,7 @@ export default function App() {
       selectionAfter: annotation.id,
     });
     patchSessionImage(currentImage.id, { status: "ready" });
+    if (reviewFilter === "pending") setReviewFilter("all");
     setTool("select");
   };
 
@@ -387,29 +408,81 @@ export default function App() {
     const image = imagesRef.current.find((item) => item.id === imageId);
     const index = image?.annotations.findIndex((annotation) => annotation.id === id) ?? -1;
     if (!image || index < 0) return;
+    const nextPending = reviewFilter === "pending"
+      ? image.annotations.find((annotation) => annotation.id !== id && annotation.reviewState === "suggested")?.id ?? null
+      : null;
     commitAnnotationCommand({
       kind: "delete",
       imageId: image.id,
       annotation: image.annotations[index],
       index,
       selectionBefore: id,
-      selectionAfter: null,
+      selectionAfter: nextPending,
     });
-  }, [commitAnnotationCommand]);
+  }, [commitAnnotationCommand, reviewFilter]);
 
   const changeAnnotationClass = (id: string, classId: number) => {
     const chosenClass = classes.find((item) => item.id === classId);
     if (!currentImage || !chosenClass) return;
     const annotation = currentImage.annotations.find((item) => item.id === id);
     if (!annotation) return;
+    const selectionAfter = annotation.reviewState === "suggested" && reviewFilter === "pending"
+      ? currentImage.annotations.find((item) => item.id !== id && item.reviewState === "suggested")?.id ?? null
+      : id;
     commitAnnotationCommand({
       kind: "class",
       imageId: currentImage.id,
       annotationId: id,
       before: { classId: annotation.classId, label: annotation.label },
       after: { classId, label: chosenClass.name },
+      reviewBefore: annotation.reviewState,
+      reviewAfter: annotation.reviewState === "suggested" ? "edited" : annotation.reviewState,
       selectionBefore: id,
-      selectionAfter: id,
+      selectionAfter,
+    });
+  };
+
+  const acceptAnnotation = (id: string) => {
+    if (!currentImage) return;
+    const annotation = currentImage.annotations.find((item) => item.id === id);
+    if (!annotation || annotation.reviewState !== "suggested") return;
+    const nextPending = reviewFilter === "pending"
+      ? currentImage.annotations.find((item) => item.id !== id && item.reviewState === "suggested")?.id ?? null
+      : id;
+    commitAnnotationCommand({
+      kind: "review",
+      imageId: currentImage.id,
+      annotationId: id,
+      before: "suggested",
+      after: "accepted",
+      selectionBefore: id,
+      selectionAfter: nextPending,
+    });
+  };
+
+  const acceptAllAnnotations = () => {
+    if (!currentImage) return;
+    const after = acceptPendingSuggestions(currentImage.annotations);
+    commitAnnotationCommand({
+      kind: "replace-all",
+      imageId: currentImage.id,
+      before: currentImage.annotations,
+      after,
+      selectionBefore: selectedAnnotationId,
+      selectionAfter: reviewFilter === "pending" ? null : selectedAnnotationId,
+    });
+  };
+
+  const rejectAllAnnotations = () => {
+    if (!currentImage) return;
+    const after = currentImage.annotations.filter((annotation) => annotation.reviewState !== "suggested");
+    commitAnnotationCommand({
+      kind: "replace-all",
+      imageId: currentImage.id,
+      before: currentImage.annotations,
+      after,
+      selectionBefore: selectedAnnotationId,
+      selectionAfter: null,
     });
   };
 
@@ -462,6 +535,8 @@ export default function App() {
     setExportFormat("yolo");
     setExportScope("all");
     setIncludeConfidence(false);
+    setIncludeSuggestions(false);
+    setReviewFilter("all");
     setTool("select");
     setModelStatus("idle");
     setModelMessage("");
@@ -525,10 +600,11 @@ export default function App() {
   const doExport = async () => {
     const selectedImages = exportScope === "current" && currentImage ? [currentImage] : images;
     if (!selectedImages.length) return;
+    const exportImages = prepareImagesForExport(selectedImages, includeSuggestions);
     setExporting(true);
     setExportError("");
     try {
-      await exportAnnotations({ format: exportFormat, images: selectedImages, classes, includeConfidence });
+      await exportAnnotations({ format: exportFormat, images: exportImages, classes, includeConfidence });
     } catch (error) {
       setExportError(error instanceof Error ? error.message : "내보내기에 실패했습니다.");
     } finally {
@@ -641,6 +717,7 @@ export default function App() {
           selectedId={selectedAnnotationId}
           tool={tool}
           zoom={zoom}
+          reviewFilter={reviewFilter}
           onSelect={setSelectedAnnotationId}
           onCommitBox={commitBoxChange}
           onCreate={createAnnotation}
@@ -654,10 +731,19 @@ export default function App() {
           exportFormat={exportFormat}
           exportScope={exportScope}
           includeConfidence={includeConfidence}
+          includeSuggestions={includeSuggestions}
+          reviewFilter={reviewFilter}
           exporting={exporting}
           exportError={exportError}
           onSelect={setSelectedAnnotationId}
           onDelete={deleteAnnotation}
+          onAccept={acceptAnnotation}
+          onAcceptAll={acceptAllAnnotations}
+          onRejectAll={rejectAllAnnotations}
+          onReviewFilter={(filter) => {
+            setReviewFilter(filter);
+            if (filter === "pending" && selectedAnnotation?.reviewState !== "suggested") setSelectedAnnotationId(null);
+          }}
           onAnnotationClass={changeAnnotationClass}
           onAddClass={addClass}
           onRenameClass={renameClass}
@@ -665,6 +751,7 @@ export default function App() {
           onExportFormat={setExportFormat}
           onExportScope={setExportScope}
           onIncludeConfidence={setIncludeConfidence}
+          onIncludeSuggestions={setIncludeSuggestions}
           onExport={() => void doExport()}
           onClearError={() => setExportError("")}
         />

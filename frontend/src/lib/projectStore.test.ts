@@ -29,6 +29,7 @@ function makeImage(id: string, byte: number, annotationCount = 1): SessionImage 
       label: "object",
       score: null,
       source: "manual",
+      reviewState: "accepted",
       x1: 10,
       y1: 20,
       x2: 80,
@@ -44,7 +45,7 @@ function makeState(images = [makeImage("one", 4)]): ProjectState {
     classes: [{ id: 0, name: "object", color: "#99c2a2" }],
     images,
     selectedImageId: images[0]?.id ?? null,
-    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false },
+    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false },
   };
 }
 

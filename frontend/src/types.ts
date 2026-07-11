@@ -31,6 +31,7 @@ export interface Annotation extends BoxCoordinates {
   label: string;
   score: number | null;
   source: "model" | "manual";
+  reviewState: "suggested" | "accepted" | "edited";
 }
 
 export type ImageStatus = "idle" | "running" | "ready" | "error";

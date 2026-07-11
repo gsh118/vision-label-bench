@@ -29,7 +29,7 @@ function makeState(): ProjectState {
     classes: [{ id: 0, name: "object", color: "#99c2a2" }],
     images: [image],
     selectedImageId: image.id,
-    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false },
+    preferences: { zoom: 1, exportFormat: "yolo", exportScope: "all", includeConfidence: false, includeSuggestions: false },
   };
 }
 
