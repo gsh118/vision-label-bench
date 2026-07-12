@@ -7,8 +7,11 @@ import { Inspector } from "./components/Inspector";
 import { ModelBrowser } from "./components/ModelBrowser";
 import { ModelInfoPanel } from "./components/ModelInfoPanel";
 import { SessionRail } from "./components/SessionRail";
-import { exportAnnotations, getHealth, inferImage, loadModel } from "./lib/api";
-import { resolveClassConflicts, type ClassResolution, type DatasetImportManifest } from "./lib/datasetImport";
+import { useInferenceController } from "./features/inference/useInferenceController";
+import { useProjectController } from "./features/project/useProjectController";
+import { useWorkspaceState } from "./features/workspace/useWorkspaceState";
+import { exportAnnotations, getHealth } from "./lib/api";
+import { type ClassResolution, type DatasetImportManifest } from "./lib/datasetImport";
 import {
   applyAnnotationCommand,
   isNoopCommand,
@@ -19,17 +22,9 @@ import {
   type AnnotationCommand,
   type AnnotationHistory,
 } from "./lib/annotationHistory";
-import { downloadProjectBackup, readProjectBackup } from "./lib/projectBackup";
 import type { HydratedProject, ProjectState } from "./lib/projectDocument";
 import {
-  clearLocalProject,
-  loadLocalProject,
-  requestPersistentProjectStorage,
-  saveLocalProject,
-} from "./lib/projectStore";
-import {
   acceptAllSuggestions as acceptPendingSuggestions,
-  mergeModelSuggestions,
   prepareImagesForExport,
 } from "./lib/review";
 import type {
@@ -39,9 +34,6 @@ import type {
   HealthResponse,
   LabelClass,
   ModelConfig,
-  ModelInspection,
-  ModelLoadResponse,
-  ProjectSaveStatus,
   SessionImage,
   ToolKind,
 } from "./types";
@@ -57,20 +49,31 @@ const DEFAULT_MODEL_CONFIG: ModelConfig = {
 };
 
 export default function App() {
-  const [images, setImages] = useState<SessionImage[]>([]);
-  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
-  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
-  const [classes, setClasses] = useState<LabelClass[]>(() => DEFAULT_CLASSES.map((item) => ({ ...item })));
+  const workspace = useWorkspaceState(DEFAULT_CLASSES, DEFAULT_MODEL_CONFIG);
+  const {
+    images,
+    imagesRef,
+    setImages,
+    appendSessionImages,
+    replaceSessionImages,
+    replaceImageAnnotations,
+    patchSessionImage,
+    selectedImageId,
+    selectedImageIdRef,
+    setSelectedImageId,
+    selectedAnnotationId,
+    selectedAnnotationIdRef,
+    setSelectedAnnotationId,
+    classes,
+    classesRef,
+    setClasses,
+    modelConfig,
+    setModelConfig,
+  } = workspace;
   const [tool, setTool] = useState<ToolKind>("select");
   const [zoom, setZoom] = useState(1);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [modelConfig, setModelConfig] = useState<ModelConfig>(() => ({ ...DEFAULT_MODEL_CONFIG }));
-  const [modelStatus, setModelStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [modelMessage, setModelMessage] = useState("");
   const [modelBrowserOpen, setModelBrowserOpen] = useState(false);
-  const [modelInfoOpen, setModelInfoOpen] = useState(false);
-  const [modelInspection, setModelInspection] = useState<ModelInspection | null>(null);
-  const [batchRunning, setBatchRunning] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("yolo");
   const [exportScope, setExportScope] = useState<"current" | "all">("all");
   const [includeConfidence, setIncludeConfidence] = useState(false);
@@ -79,27 +82,10 @@ export default function App() {
   const [reviewFilter, setReviewFilter] = useState<"all" | "pending">("all");
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
-  const [projectReady, setProjectReady] = useState(false);
-  const [projectBusy, setProjectBusy] = useState(false);
-  const [projectStatus, setProjectStatus] = useState<ProjectSaveStatus>("restoring");
-  const [projectMessage, setProjectMessage] = useState("이전 로컬 작업을 확인하는 중");
   const [datasetImportOpen, setDatasetImportOpen] = useState(false);
-  const [pendingModelMapping, setPendingModelMapping] = useState<{ response: ModelLoadResponse; resolutions: ClassResolution[] } | null>(null);
   const [annotationHistory, setAnnotationHistory] = useState<AnnotationHistory>({});
-  const imagesRef = useRef(images);
-  const selectedImageIdRef = useRef(selectedImageId);
-  const selectedAnnotationIdRef = useRef(selectedAnnotationId);
   const historyRef = useRef(annotationHistory);
-  const classesRef = useRef(classes);
-  const modelConfigRef = useRef(modelConfig);
-  const autosaveRevisionRef = useRef(0);
-  const storageRequestedRef = useRef(false);
-  imagesRef.current = images;
-  selectedImageIdRef.current = selectedImageId;
-  selectedAnnotationIdRef.current = selectedAnnotationId;
   historyRef.current = annotationHistory;
-  classesRef.current = classes;
-  modelConfigRef.current = modelConfig;
 
   const replaceHistory = useCallback((nextHistory: AnnotationHistory) => {
     historyRef.current = nextHistory;
@@ -107,29 +93,6 @@ export default function App() {
   }, []);
 
   const resetHistory = useCallback(() => replaceHistory({}), [replaceHistory]);
-
-  const replaceSessionImages = useCallback((nextImages: SessionImage[]) => {
-    const previousImages = imagesRef.current;
-    imagesRef.current = nextImages;
-    setImages(nextImages);
-    for (const image of previousImages) URL.revokeObjectURL(image.url);
-  }, []);
-
-  const replaceImageAnnotations = useCallback((imageId: string, annotations: Annotation[]) => {
-    const nextImages = imagesRef.current.map((image) => image.id === imageId
-      ? { ...image, annotations }
-      : image);
-    imagesRef.current = nextImages;
-    setImages(nextImages);
-  }, []);
-
-  const patchSessionImage = useCallback((imageId: string, patch: Partial<Omit<SessionImage, "id">>) => {
-    const nextImages = imagesRef.current.map((image) => image.id === imageId
-      ? { ...image, ...patch }
-      : image);
-    imagesRef.current = nextImages;
-    setImages(nextImages);
-  }, []);
 
   const commitAnnotationCommand = useCallback((command: AnnotationCommand) => {
     if (isNoopCommand(command)) return;
@@ -141,7 +104,26 @@ export default function App() {
     if (selectedImageIdRef.current === command.imageId) setSelectedAnnotationId(applied.selection);
   }, [replaceHistory, replaceImageAnnotations]);
 
+  const {
+    modelStatus,
+    modelMessage,
+    modelInfoOpen,
+    setModelInfoOpen,
+    modelInspection,
+    batchRunning,
+    pendingModelMapping,
+    setPendingModelMapping,
+    runInference,
+    runAll,
+    preflightModel,
+    changeModelConfig,
+    resetInference,
+    cancelPendingMapping,
+    applyPendingMapping,
+  } = useInferenceController({ workspace, palette: PALETTE, commitAnnotationCommand });
+
   const applyProject = useCallback((project: HydratedProject) => {
+    resetInference();
     replaceSessionImages(project.images);
     setSelectedImageId(project.selectedImageId);
     setSelectedAnnotationId(null);
@@ -155,55 +137,23 @@ export default function App() {
     setIncludeOriginalImages(project.preferences.includeOriginalImages);
     setReviewFilter("all");
     setTool("select");
-    setModelStatus("idle");
-    setModelMessage("");
-    setModelInspection(null);
-    setModelInfoOpen(false);
     setExportError("");
     resetHistory();
-  }, [replaceSessionImages, resetHistory]);
+  }, [replaceSessionImages, resetHistory, resetInference, setClasses, setModelConfig, setSelectedAnnotationId, setSelectedImageId]);
 
   useEffect(() => {
     let active = true;
     getHealth().then((result) => active && setHealth(result)).catch(() => active && setHealth(null));
     return () => {
       active = false;
-      for (const image of imagesRef.current) URL.revokeObjectURL(image.url);
     };
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    loadLocalProject()
-      .then((project) => {
-        if (!active) {
-          if (project) for (const image of project.images) URL.revokeObjectURL(image.url);
-          return;
-        }
-        if (project) {
-          applyProject(project);
-          setProjectMessage(`이전 작업 복구됨 · 이미지 ${project.images.length}장`);
-        } else {
-          setProjectMessage("로컬 자동 저장 준비됨");
-        }
-        setProjectStatus("saved");
-      })
-      .catch((error) => {
-        if (!active) return;
-        setProjectStatus("error");
-        setProjectMessage(error instanceof Error ? error.message : "이전 작업을 복구하지 못했습니다.");
-      })
-      .finally(() => active && setProjectReady(true));
-    return () => {
-      active = false;
-    };
-  }, [applyProject]);
 
   const currentIndex = Math.max(0, images.findIndex((item) => item.id === selectedImageId));
   const currentImage = images[currentIndex] ?? null;
   const selectedAnnotation = currentImage?.annotations.find((item) => item.id === selectedAnnotationId) ?? null;
 
-  const createCurrentProjectState = useCallback((): ProjectState => ({
+  const projectSnapshot = useMemo<ProjectState>(() => ({
     modelConfig,
     classes,
     images,
@@ -218,40 +168,26 @@ export default function App() {
     },
   }), [classes, exportFormat, exportScope, images, includeConfidence, includeOriginalImages, includeSuggestions, modelConfig, selectedImageId, zoom]);
 
-  useEffect(() => {
-    if (!projectReady) return;
-    const revision = ++autosaveRevisionRef.current;
-    const snapshot = createCurrentProjectState();
-    setProjectStatus("saving");
-    setProjectMessage("변경사항을 로컬에 저장하는 중");
-    const timer = window.setTimeout(() => {
-      saveLocalProject(snapshot)
-        .then(() => {
-          if (revision !== autosaveRevisionRef.current) return;
-          setProjectStatus("saved");
-          setProjectMessage(`자동 저장됨 · ${formatClock(new Date())}`);
-        })
-        .catch((error) => {
-          if (revision !== autosaveRevisionRef.current) return;
-          setProjectStatus("error");
-          setProjectMessage(error instanceof Error ? error.message : "로컬 자동 저장에 실패했습니다.");
-        });
-    }, 850);
-    return () => window.clearTimeout(timer);
-  }, [createCurrentProjectState, projectReady]);
+  const {
+    busy: projectBusy,
+    status: projectStatus,
+    message: projectMessage,
+    requestPersistentStorage,
+    clearProject,
+    openProject,
+    saveProject,
+    markChanged: markProjectChanged,
+  } = useProjectController({ snapshot: projectSnapshot, imageCount: images.length, applyProject });
 
   const addFiles = useCallback(async (files: FileList | File[]) => {
     const accepted = Array.from(files).filter((file) => file.type.startsWith("image/"));
     const loaded = await Promise.all(accepted.map(readSessionImage));
     if (!loaded.length) return;
-    if (!storageRequestedRef.current) {
-      storageRequestedRef.current = true;
-      void requestPersistentProjectStorage();
-    }
-    setImages((previous) => [...previous, ...loaded]);
+    requestPersistentStorage();
+    appendSessionImages(loaded);
     setSelectedImageId((previous) => previous ?? loaded[0].id);
     setSelectedAnnotationId(null);
-  }, []);
+  }, [appendSessionImages, requestPersistentStorage, setSelectedAnnotationId, setSelectedImageId]);
 
   const selectByOffset = useCallback((offset: number) => {
     setSelectedImageId((currentId) => {
@@ -263,125 +199,8 @@ export default function App() {
     setSelectedAnnotationId(null);
   }, []);
 
-  const mergeModelClasses = (incoming: Record<string, string>, overrides?: ClassResolution[]): Record<string, number> => {
-    const source = Object.entries(incoming).map(([rawId, name]) => ({ id: Number(rawId), name }));
-    const configured = modelConfigRef.current.classMap;
-    const validConfigured = configured && source.every((item) => configured[String(item.id)] != null);
-    const resolutions = overrides ?? (validConfigured
-      ? source.map((item) => ({ sourceId: item.id, sourceName: item.name, targetId: configured[String(item.id)], targetName: classesRef.current.find((entry) => entry.id === configured[String(item.id)])?.name ?? item.name, conflict: "none" as const }))
-      : resolveClassConflicts(classesRef.current, source));
-    const classMap = Object.fromEntries(resolutions.map((item) => [String(item.sourceId), item.targetId]));
-    const next = new Map(classesRef.current.map((item) => [item.id, item]));
-    for (const resolution of resolutions) {
-      if (!next.has(resolution.targetId)) next.set(resolution.targetId, { id: resolution.targetId, name: resolution.targetName, color: PALETTE[resolution.targetId % PALETTE.length] });
-    }
-    const nextClasses = [...next.values()].sort((a, b) => a.id - b.id);
-    classesRef.current = nextClasses;
-    setClasses(nextClasses);
-    modelConfigRef.current = { ...modelConfigRef.current, classMap };
-    setModelConfig((config) => ({ ...config, classMap }));
-    return classMap;
-  };
-
-  const runInference = async (image: SessionImage) => {
-    patchSessionImage(image.id, { status: "running", error: null });
-    try {
-      const response = await inferImage(image, modelConfig);
-      const classMap = mergeModelClasses(response.model.classes);
-      const annotations: Annotation[] = response.detections.map((item) => ({
-        id: crypto.randomUUID(),
-        classId: classMap[String(item.class_id)] ?? item.class_id,
-        label: classesRef.current.find((entry) => entry.id === (classMap[String(item.class_id)] ?? item.class_id))?.name ?? item.label,
-        score: item.score,
-        source: "model",
-        reviewState: "suggested",
-        x1: item.x1,
-        y1: item.y1,
-        x2: item.x2,
-        y2: item.y2,
-      }));
-      const latestImage = imagesRef.current.find((item) => item.id === image.id);
-      if (latestImage) {
-        const mergedAnnotations = mergeModelSuggestions(latestImage.annotations, annotations);
-        commitAnnotationCommand({
-          kind: "replace-all",
-          imageId: image.id,
-          before: latestImage.annotations,
-          after: mergedAnnotations,
-          selectionBefore: selectedImageIdRef.current === image.id ? selectedAnnotationIdRef.current : null,
-          selectionAfter: null,
-        });
-      }
-      patchSessionImage(image.id, {
-        width: response.width,
-        height: response.height,
-        status: "ready",
-        elapsedMs: response.elapsed_ms,
-        error: null,
-      });
-      setModelStatus("ready");
-      setModelMessage(`${response.model.adapter.toUpperCase()} · ${response.model.device} · ${response.elapsed_ms.toFixed(0)} ms`);
-      setModelInspection((previous) => ({
-        model: response.model,
-        loadTimeMs: previous?.model.model_ref === response.model.model_ref ? previous.loadTimeMs : null,
-        cached: previous?.model.model_ref === response.model.model_ref ? previous.cached : true,
-        inference: {
-          imageName: image.name,
-          detectionCount: response.detections.length,
-          elapsedMs: response.elapsed_ms,
-          capturedAt: new Date().toISOString(),
-          trace: response.trace,
-        },
-      }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "추론에 실패했습니다.";
-      patchSessionImage(image.id, { status: "error", error: message });
-      setModelStatus("error");
-      setModelMessage(message);
-    }
-  };
-
   const runCurrent = () => {
     if (currentImage && modelConfig.modelRef.trim()) void runInference(currentImage);
-  };
-
-  const runAll = async () => {
-    if (!images.length || batchRunning) return;
-    setBatchRunning(true);
-    for (const image of images) await runInference(image);
-    setBatchRunning(false);
-  };
-
-  const preflightModel = async () => {
-    setModelStatus("loading");
-    setModelMessage("");
-    setModelInspection(null);
-    setModelInfoOpen(true);
-    try {
-      const response = await loadModel(modelConfig);
-      const source = Object.entries(response.model.classes).map(([id, name]) => ({ id: Number(id), name }));
-      const resolutions = resolveClassConflicts(classesRef.current, source);
-      if (resolutions.some((item) => item.conflict === "id-conflict" || item.conflict === "same-name")) {
-        setPendingModelMapping({ response, resolutions });
-        setModelStatus("idle");
-        setModelMessage("클래스 매핑 확인 필요");
-        return;
-      }
-      mergeModelClasses(response.model.classes, resolutions);
-      setModelStatus("ready");
-      setModelMessage(`${response.model.adapter.toUpperCase()} 준비됨 · ${response.model.device}`);
-      setModelInspection({
-        model: response.model,
-        loadTimeMs: response.load_time_ms,
-        cached: response.cached,
-        inference: null,
-      });
-      setModelInfoOpen(true);
-    } catch (error) {
-      setModelStatus("error");
-      setModelInfoOpen(false);
-      setModelMessage(error instanceof Error ? error.message : "모델을 불러오지 못했습니다.");
-    }
   };
 
   const commitBoxChange = (
@@ -557,7 +376,7 @@ export default function App() {
 
   const newProject = () => {
     if (imagesRef.current.length && !window.confirm("현재 작업을 닫고 새 프로젝트를 시작할까요? 자동 저장된 작업도 교체됩니다.")) return;
-    autosaveRevisionRef.current += 1;
+    resetInference();
     replaceSessionImages([]);
     setSelectedImageId(null);
     setSelectedAnnotationId(null);
@@ -571,64 +390,10 @@ export default function App() {
     setIncludeOriginalImages(false);
     setReviewFilter("all");
     setTool("select");
-    setModelStatus("idle");
-    setModelMessage("");
-    setModelInspection(null);
-    setModelInfoOpen(false);
     setExportError("");
     resetHistory();
-    setProjectStatus("saving");
-    setProjectMessage("새 프로젝트를 준비하는 중");
-    void clearLocalProject()
-      .then(() => {
-        setProjectStatus("saved");
-        setProjectMessage("새 프로젝트 · 자동 저장 준비됨");
-      })
-      .catch((error) => {
-        setProjectStatus("error");
-        setProjectMessage(error instanceof Error ? error.message : "기존 자동 저장을 지우지 못했습니다.");
-      });
+    void clearProject();
   };
-
-  const openProject = async (file: File) => {
-    if (projectBusy) return;
-    if (imagesRef.current.length && !window.confirm("현재 작업을 닫고 선택한 프로젝트를 열까요?")) return;
-    setProjectBusy(true);
-    setProjectStatus("restoring");
-    setProjectMessage(`${file.name} 읽는 중`);
-    try {
-      const project = await readProjectBackup(file);
-      applyProject(project);
-      await saveLocalProject(project);
-      autosaveRevisionRef.current += 1;
-      setProjectStatus("saved");
-      setProjectMessage(`프로젝트 열림 · 이미지 ${project.images.length}장`);
-    } catch (error) {
-      setProjectStatus("error");
-      setProjectMessage(error instanceof Error ? error.message : "프로젝트를 열지 못했습니다.");
-    } finally {
-      setProjectBusy(false);
-    }
-  };
-
-  const saveProject = useCallback(async () => {
-    if (projectBusy || !images.length) return;
-    setProjectBusy(true);
-    setProjectStatus("saving");
-    setProjectMessage("휴대용 프로젝트 백업을 만드는 중");
-    try {
-      const snapshot = createCurrentProjectState();
-      await saveLocalProject(snapshot);
-      const filename = await downloadProjectBackup(snapshot);
-      setProjectStatus("saved");
-      setProjectMessage(`${filename} 저장됨`);
-    } catch (error) {
-      setProjectStatus("error");
-      setProjectMessage(error instanceof Error ? error.message : "프로젝트 백업을 만들지 못했습니다.");
-    } finally {
-      setProjectBusy(false);
-    }
-  }, [createCurrentProjectState, images.length, projectBusy]);
 
   const doExport = async () => {
     const selectedImages = exportScope === "current" && currentImage ? [currentImage] : images;
@@ -690,26 +455,19 @@ export default function App() {
     classesRef.current = nextClasses;
     setClasses(nextClasses);
     if (mode === "new") {
-      autosaveRevisionRef.current += 1;
+      resetInference();
       replaceSessionImages(importedImages);
       setSelectedImageId(importedImages[0]?.id ?? null);
-      modelConfigRef.current = { ...DEFAULT_MODEL_CONFIG };
       setModelConfig({ ...DEFAULT_MODEL_CONFIG });
       resetHistory();
     } else {
-      const nextImages = [...imagesRef.current, ...importedImages];
-      imagesRef.current = nextImages;
-      setImages(nextImages);
+      appendSessionImages(importedImages);
       setSelectedImageId((current) => current ?? importedImages[0]?.id ?? null);
     }
-    if (!storageRequestedRef.current && importedImages.length) {
-      storageRequestedRef.current = true;
-      void requestPersistentProjectStorage();
-    }
+    if (importedImages.length) requestPersistentStorage();
     setSelectedAnnotationId(null);
     setDatasetImportOpen(false);
-    setProjectStatus("saving");
-    setProjectMessage(`${manifest.sourceName} 가져옴 · 이미지 ${importedImages.length}장 · 클래스 ${nextClasses.length}개`);
+    markProjectChanged(`${manifest.sourceName} 가져옴 · 이미지 ${importedImages.length}장 · 클래스 ${nextClasses.length}개`);
   };
 
   useEffect(() => {
@@ -798,17 +556,7 @@ export default function App() {
           onSaveProject={() => void saveProject()}
           onImportDataset={() => setDatasetImportOpen(true)}
           onSelect={(id) => { setSelectedImageId(id); setSelectedAnnotationId(null); }}
-          onModelChange={(patch) => {
-            setModelConfig((config) => ({
-              ...config,
-              ...patch,
-              classMap: patch.modelRef !== undefined || patch.adapter !== undefined ? undefined : config.classMap,
-            }));
-            setModelStatus("idle");
-            setModelMessage("");
-            setModelInspection(null);
-            setModelInfoOpen(false);
-          }}
+          onModelChange={changeModelConfig}
           onLoadModel={() => void preflightModel()}
           onBrowseModel={() => setModelBrowserOpen(true)}
           hasModelInfo={Boolean(modelInspection)}
@@ -868,13 +616,7 @@ export default function App() {
         adapter={modelConfig.adapter}
         initialPath={modelConfig.modelRef}
         onClose={() => setModelBrowserOpen(false)}
-        onSelect={(modelRef) => {
-          setModelConfig((config) => ({ ...config, modelRef, classMap: undefined }));
-          setModelStatus("idle");
-          setModelMessage("");
-          setModelInspection(null);
-          setModelInfoOpen(false);
-        }}
+        onSelect={(modelRef) => changeModelConfig({ modelRef })}
       />
       <ModelInfoPanel
         open={modelInfoOpen}
@@ -896,21 +638,8 @@ export default function App() {
         modelName={pendingModelMapping?.response.model.model_ref ?? ""}
         resolutions={pendingModelMapping?.resolutions ?? []}
         onChange={(resolutions) => setPendingModelMapping((pending) => pending ? { ...pending, resolutions } : null)}
-        onClose={() => {
-          setPendingModelMapping(null);
-          setModelInfoOpen(false);
-          setModelMessage("클래스 매핑 취소됨");
-        }}
-        onApply={() => {
-          if (!pendingModelMapping) return;
-          const { response, resolutions } = pendingModelMapping;
-          mergeModelClasses(response.model.classes, resolutions);
-          setModelStatus("ready");
-          setModelMessage(`${response.model.adapter.toUpperCase()} 준비됨 · ${response.model.device}`);
-          setModelInspection({ model: response.model, loadTimeMs: response.load_time_ms, cached: response.cached, inference: null });
-          setModelInfoOpen(true);
-          setPendingModelMapping(null);
-        }}
+        onClose={cancelPendingMapping}
+        onApply={applyPendingMapping}
       />
     </div>
   );
@@ -938,13 +667,4 @@ async function readSessionImage(file: File): Promise<SessionImage> {
     relativePath: null,
     split: "unspecified",
   };
-}
-
-function formatClock(date: Date): string {
-  return new Intl.DateTimeFormat("ko-KR", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
 }

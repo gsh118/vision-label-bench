@@ -15,7 +15,7 @@ export async function getHealth(): Promise<HealthResponse> {
   return response.json();
 }
 
-export async function loadModel(config: ModelConfig): Promise<ModelLoadResponse> {
+export async function loadModel(config: ModelConfig, signal?: AbortSignal): Promise<ModelLoadResponse> {
   const response = await fetch("/api/models/load", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -24,6 +24,7 @@ export async function loadModel(config: ModelConfig): Promise<ModelLoadResponse>
       model_ref: config.modelRef,
       device: config.device,
     }),
+    signal,
   });
   if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
@@ -41,6 +42,7 @@ export async function browseModels(path?: string): Promise<ModelBrowseResponse> 
 export async function inferImage(
   image: SessionImage,
   config: ModelConfig,
+  signal?: AbortSignal,
 ): Promise<InferenceResponse> {
   const body = new FormData();
   body.append("image", image.file, image.name);
@@ -49,7 +51,7 @@ export async function inferImage(
   body.append("device", config.device);
   body.append("confidence", String(config.confidence));
   body.append("iou", String(config.iou));
-  const response = await fetch("/api/infer", { method: "POST", body });
+  const response = await fetch("/api/infer", { method: "POST", body, signal });
   if (!response.ok) throw new Error(await errorMessage(response));
   return response.json();
 }
